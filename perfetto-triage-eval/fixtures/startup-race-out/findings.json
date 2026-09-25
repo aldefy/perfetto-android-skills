@@ -1,0 +1,20 @@
+{
+  "trace": "/Users/adit/Desktop/com.example.stickerexplode-startup-171407.pftrace",
+  "pkg": "com.example.stickerexplode",
+  "findings": [
+    {
+      "severity": "medium",
+      "area": "binder",
+      "title": "Main-thread binder: AIDL::cpp::android.gui.SensorEventConnection::#2::server costs 31 ms",
+      "detail": "2 synchronous calls from com.example.stickerexplode to system_server, worst single call 16.3 ms.",
+      "action": "Synchronous binder on the main thread is a frozen UI. Cache the result, batch the calls, or move them to a background dispatcher. System APIs that look local (PackageManager, ConnectivityManager, DisplayManager, SharedPreferences-backed system settings) are binder calls underneath."
+    },
+    {
+      "severity": "info",
+      "area": "binder",
+      "title": "Slow binder calls are queueing, not computing",
+      "detail": "Dominant client-side reason is 'S' (72 ms).",
+      "action": "The server side is not the bottleneck; the client is descheduled or waiting for a free binder thread. Reducing call *count* helps more than making the server faster."
+    }
+  ]
+}

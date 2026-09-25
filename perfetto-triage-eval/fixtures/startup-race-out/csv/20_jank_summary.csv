@@ -1,0 +1,2 @@
+process_name,frames,janky,janky_pct,big_jank,huge_jank,worst_overrun_ms,app_jank,sf_jank
+com.android.systemui,67,1,1.490000,0,0,4.228124,0,0

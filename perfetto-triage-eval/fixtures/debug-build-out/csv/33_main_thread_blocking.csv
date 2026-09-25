@@ -1,0 +1,9 @@
+process_name,state,blocked_function,n,total_ms
+com.example.stickerexplode,Sleeping,-,153,4889.459355
+com.example.stickerexplode,Running,-,294,388.994093
+com.example.stickerexplode,Uninterruptible Sleep (IO),folio_wait_bit_common,2,9.113445
+com.example.stickerexplode,Runnable,-,175,6.580936
+com.example.stickerexplode,Runnable (Preempted),-,102,3.486123
+com.example.stickerexplode,Uninterruptible Sleep (non-IO),synchronize_rcu_expedited,1,0.051799
+com.example.stickerexplode,Uninterruptible Sleep,-,2,0.026001
+com.example.stickerexplode,Exit (Zombie),-,1,-0.000001

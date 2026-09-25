@@ -9,9 +9,8 @@ run it the same way every time: capture a real trace, ask the same four
 questions in the same order, rank findings by *self* time, map slice names
 back to files in your repo, then measure again after the fix.
 
-Built for and demoed live at [BLR Droid](https://trace-to-triage.pages.dev).
-Every query pack result and every finding shown in that talk came from this
-exact skill, run against a real device, the same night as the talk.
+Built for [BLR Droid](https://trace-to-triage.pages.dev), a talk on reading
+Perfetto traces and automating that reading.
 
 ## What's inside
 
@@ -92,17 +91,17 @@ does not collapse this into a single "% improvement" number on purpose.
 Report the median of at least 10 runs, not the best one, or say plainly that
 you didn't.
 
-## Real numbers, not a toy example
+## Source app
 
-The skill's own docs used to use `ICameraService::connect` as a worked
-example. We didn't carry that over. Every number in the BLR Droid talk came
-from a real capture against a real app
-([StickerExplode](https://github.com/aldefy/StickerExplode), public), on a
-Pixel 9 Pro Fold, release build. That includes the failures: a debug-build
-contamination bug found and fixed live, a capture race condition in
-`android_startups` found and fixed live, and one applied code fix (a custom
-AGSL shader skipped at rest) that produced a real, honestly reported partial
-improvement, not a fabricated clean win.
+The BLR Droid talk used [StickerExplode](https://github.com/aldefy/StickerExplode)
+(public) on a Pixel 9 Pro Fold, release build, as the test app. Known issues
+hit during that session: a debug-build contamination bug (fixed in
+`capture.sh`'s verification), and a capture race condition in
+`android_startups` (fixed by increasing the delay between starting the trace
+and force-stopping the app). One applied fix: a custom AGSL shader skipped
+when the device is near-flat, which produced a partial improvement, not a
+full fix. See `perfetto-triage-eval/` for the known failure modes this
+surfaced.
 
 ## Agent skill installation guide
 

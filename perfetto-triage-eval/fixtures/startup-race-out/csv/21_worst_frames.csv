@@ -1,0 +1,2 @@
+process_name,frame_id,ts,overrun_ms,cpu_ms,ui_ms,jank_type,present_type
+com.android.systemui,26065731,276637193509854,4.228124,14.854857,3.465820,Non Animating,Unspecified Present

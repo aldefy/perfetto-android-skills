@@ -1,0 +1,31 @@
+name,thread_name,n,total_ms,self_ms
+Compiling baseline,Jit thread pool,8174,841.347769,746.101398
+waitForever,GPU completion,32,373.337525,373.337525
+postAndWait,.stickerexplode,32,264.864014,264.864014
+EmojiCompat.MetadataRepo.create,EmojiCompatInit,1,184.465699,182.199683
+waitForever,HWC release,20,107.212239,107.212239
+ScopedCodeCacheWrite,Jit thread pool,16798,95.942612,95.942612
+auto skgpu::ganesh::OpsTask::onExecute(GrOpFlushState *)::(anonymous class)::operator()() const,RenderThread,15924,142.782867,87.416265
+Vulkan finish frame,RenderThread,32,262.533776,83.065757
+binder transaction,.stickerexplode,79,73.365472,73.365472
+Drawing  0.00  0.00 1080.00 2424.00,RenderThread,32,349.993817,62.958744
+Compose:recompose,.stickerexplode,10,63.015382,56.809149
+waitForBufferRelease,RenderThread,10,50.429119,50.046185
+Recomposer:animation,.stickerexplode,30,37.730063,35.770270
+FillRectOp,RenderThread,16222,33.175291,32.523516
+TextureOp,RenderThread,16420,31.344854,31.135463
+AndroidOwner:measureAndLayout,.stickerexplode,4,29.585165,26.548090
+traversal,.stickerexplode,33,449.488323,26.145576
+auto skgpu::ganesh::OpsTask::onPrepare(GrOpFlushState *)::(anonymous class)::operator()() const,RenderThread,15924,42.210848,23.502732
+Record View#draw(),.stickerexplode,32,50.001056,19.948482
+Compose:applyChanges,.stickerexplode,9,18.026856,17.098233
+JIT compiling void android.net.NetworkCapabilities$1.<init>() (kind=Baseline) from /apex/com.android.tethering/javalib/framework-connectivity.jar,Jit thread pool,1,16.767253,16.586182
+madvising /data/app/~~lRecWB07Rbipt3cR5vfGfw==/com.example.stickerexplode-_B-oEoFfKVfEy-cmm0J1fw==/base.apk size=44789760 chunks=342,.stickerexplode,1,13.737386,13.737386
+Mutator threads suspended for EnableDebugFeatures,.stickerexplode,1,11.229126,11.229126
+binder transaction,EmojiCompatInit,15,11.186484,11.186484
+bindApplication,.stickerexplode,1,48.600505,10.779622
+void art::ProfileSaver::GetClassesAndMethodsHelper::CollectInternal(Handle<mirror::ClassLoader>) [kBootClassLoader = false],Profile Saver,3,9.184204,9.184204
+waitForever,binder:24685_2,2,8.643799,8.643799
+wait,binder:24685_2,45,7.415081,7.415081
+performCreate:com.example.stickerexplode.MainActivity,.stickerexplode,1,12.423787,7.374269
+void art::ProfileSaver::FetchAndCacheResolvedClassesAndMethods(bool),Profile Saver,1,22.187581,6.846761

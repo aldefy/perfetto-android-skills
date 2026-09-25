@@ -1,0 +1,69 @@
+{
+  "trace": "/Users/adit/Desktop/com.example.stickerexplode-startup-163743.pftrace",
+  "pkg": "com.example.stickerexplode",
+  "findings": [
+    {
+      "severity": "high",
+      "area": "jank",
+      "title": "com.example.stickerexplode: 31/32 frames janky (96.9%)",
+      "detail": "Worst frame ran 156 ms over its deadline. App-attributed jank: 12, SurfaceFlinger-attributed: 5.",
+      "action": "Blame lands on the app. Look at the UI-thread vs RenderThread split and the hot slices during janky frames."
+    },
+    {
+      "severity": "medium",
+      "area": "startup",
+      "title": "2991 classes loaded during startup, 31 ms on the critical path",
+      "detail": "startup_id=1 (com.example.stickerexplode). Note this counts explicit class-load slices only; JIT and verification cost sits in the running time above.",
+      "action": "This is the clearest Baseline Profile signal there is. Generate one with BaselineProfileRule, then prove the win by benchmarking CompilationMode.None() against CompilationMode.Partial(BaselineProfileMode.Require)."
+    },
+    {
+      "severity": "medium",
+      "area": "jank",
+      "title": "com.example.stickerexplode: cost is on the UI thread",
+      "detail": "doFrame 547 ms vs DrawFrame 404 ms (vsync delay 308 ms).",
+      "action": "Look for measure/layout passes, recomposition, main-thread IO or deserialisation, and work posted onto the main Handler."
+    },
+    {
+      "severity": "medium",
+      "area": "jank",
+      "title": "Measure/layout/traversal cost during janky frames (1316 ms)",
+      "detail": "Slices matched: traversal",
+      "action": "Flatten the hierarchy, avoid nested weights / double measure, and hoist state so recomposition scopes stay small."
+    },
+    {
+      "severity": "medium",
+      "area": "binder",
+      "title": "Main-thread binder: AIDL::cpp::android.gui.SensorEventConnection::#2::server costs 53 ms",
+      "detail": "2 synchronous calls from com.example.stickerexplode to system_server, worst single call 42.5 ms.",
+      "action": "Synchronous binder on the main thread is a frozen UI. Cache the result, batch the calls, or move them to a background dispatcher. System APIs that look local (PackageManager, ConnectivityManager, DisplayManager, SharedPreferences-backed system settings) are binder calls underneath."
+    },
+    {
+      "severity": "info",
+      "area": "startup",
+      "title": "App never calls reportFullyDrawn()",
+      "detail": "com.example.stickerexplode has no time-to-full-display. TTID only measures the first frame, which is often a skeleton or spinner.",
+      "action": "Call Activity.reportFullyDrawn() (or ReportDrawn* in Compose) once real content is on screen, so TTFD becomes measurable and Play Console reports it."
+    },
+    {
+      "severity": "info",
+      "area": "startup",
+      "title": "Startup time is dominated by 'choreographer_do_frame'",
+      "detail": "choreographer_do_frame 93 ms, binder 61 ms, Running 33 ms",
+      "action": "First-frame rendering is expensive. Usually composition/measure/layout cost or shader compilation."
+    },
+    {
+      "severity": "info",
+      "area": "startup",
+      "title": "Startup is COMPUTE-bound \u2014 main thread runs 66% of the time",
+      "detail": "Running 172 ms vs waiting 90 ms (Running 172 ms, Sleeping 75 ms, Uninterruptible Sleep (IO) 9 ms, Runnable (Preempted) 3 ms, Runnable 3 ms, Uninterruptible Sleep (non-IO) 0 ms, Uninterruptible Sleep 0 ms).",
+      "action": "Your code, class loading, or JIT is the cost. Baseline Profiles and deferring init work off the critical path are the levers."
+    },
+    {
+      "severity": "info",
+      "area": "binder",
+      "title": "Slow binder calls are queueing, not computing",
+      "detail": "Dominant client-side reason is 'S' (68 ms).",
+      "action": "The server side is not the bottleneck; the client is descheduled or waiting for a free binder thread. Reducing call *count* helps more than making the server faster."
+    }
+  ]
+}

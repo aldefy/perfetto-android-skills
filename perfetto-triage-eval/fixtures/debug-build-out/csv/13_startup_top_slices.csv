@@ -1,0 +1,31 @@
+startup_id,slice_name,n,total_ms,max_ms
+1,Choreographer#doFrame 26045026,1,138.582601,138.582601
+1,Choreographer#doFrame - resynced to 26045031 in 23.2ms,1,138.260213,138.260213
+1,traversal,1,138.132446,138.132446
+1,binder transaction,71,61.434729,42.503540
+1,bindApplication,1,48.600505,48.600505
+1,Compose:onRemembered,1,46.964559,46.964559
+1,clientTransactionExecuted,2,36.037110,35.979004
+1,Compose:recompose,2,30.224202,29.787842
+1,activityStart,1,20.316691,20.316691
+1,/data/app/~~lRecWB07Rbipt3cR5vfGfw==/com.example.stickerexplode-_B-oEoFfKVfEy-cmm0J1fw==/base.apk,1,19.409628,19.409628
+1,OpenDexFilesFromOat(/data/app/~~lRecWB07Rbipt3cR5vfGfw==/com.example.stickerexplode-_B-oEoFfKVfEy-cmm0J1fw==/base.apk),1,17.466512,17.466512
+1,location=/data/app/~~lRecWB07Rbipt3cR5vfGfw==/com.example.stickerexplode-_B-oEoFfKVfEy-cmm0J1fw==/oat/arm64/base.odex status=up-to-date filter=verify reason=boot-after-ota,1,16.656942,16.656942
+1,AppImage:Loading,1,16.617880,16.617880
+1,activityResume,1,14.932292,14.932292
+1,madvising /data/app/~~lRecWB07Rbipt3cR5vfGfw==/com.example.stickerexplode-_B-oEoFfKVfEy-cmm0J1fw==/base.apk size=44789760 chunks=342,1,13.737386,13.737386
+1,performCreate:com.example.stickerexplode.MainActivity,1,12.423787,12.423787
+1,Mutator threads suspended for EnableDebugFeatures,1,11.229126,11.229126
+1,draw-VRI[MainActivity],1,9.227417,9.227417
+1,ActivityThreadMain,1,8.806071,8.806071
+1,measure,2,8.303874,8.097534
+1,AndroidOwner:onMeasure,2,7.926595,7.826375
+1,performResume:com.example.stickerexplode.MainActivity,1,5.448975,5.448975
+1,Compose:applyChanges,2,5.155885,5.123251
+1,layout,1,4.913614,4.913614
+1,postAndWait,1,4.644938,4.644938
+1,Record View#draw(),1,4.406820,4.406820
+1,ResourcesManager#applyConfigurationToResources,3,4.029704,3.854167
+1,ZygoteInit,1,3.851806,3.851806
+1,Startup,1,3.371623,3.371623
+1,madvising /data/app/~~lRecWB07Rbipt3cR5vfGfw==/com.example.stickerexplode-_B-oEoFfKVfEy-cmm0J1fw==/base.apk!7 size=12500992 chunks=96,1,2.696981,2.696981

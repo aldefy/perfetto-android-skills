@@ -1,0 +1,2 @@
+process_name,janky_frames,vsync_delay_ms,ui_thread_ms,render_thread_ms
+com.android.systemui,1,8.148884,3.465820,3.240153

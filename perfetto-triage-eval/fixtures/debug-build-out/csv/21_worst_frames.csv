@@ -1,0 +1,21 @@
+process_name,frame_id,ts,overrun_ms,cpu_ms,ui_ms,jank_type,present_type
+com.example.stickerexplode,26045026,274447407326696,156.494929,184.390217,138.582601,"App Deadline Missed, App Resynced Jitter",Late Present
+com.example.stickerexplode,26045279,274447565294999,113.528752,114.848316,80.793497,"App Deadline Missed, App Resynced Jitter",Late Present
+com.example.stickerexplode,26045316,274447660904741,110.243080,107.707991,9.741658,"App Deadline Missed, App Resynced Jitter",Late Present
+com.example.stickerexplode,26045703,274447707924800,53.832247,27.482701,15.541178,App Deadline Missed,Late Present
+com.example.stickerexplode,26045900,274447785750199,51.963838,41.590084,16.690349,Buffer Stuffing,On-time Present
+com.example.stickerexplode,26045878,274447766189367,48.880464,38.371617,18.796916,App Deadline Missed,Late Present
+com.example.stickerexplode,26045812,274447739675249,48.494104,26.005766,7.515137,App Deadline Missed,Late Present
+com.example.stickerexplode,26045674,274447699892534,47.216818,25.714239,7.365641,App Deadline Missed,Late Present
+com.example.stickerexplode,26045937,274447803256709,47.052114,33.849014,10.750651,SurfaceFlinger Scheduling,Early Present
+com.example.stickerexplode,26045856,274447756485876,45.244287,29.414192,8.766724,App Deadline Missed,Late Present
+com.example.stickerexplode,26045981,274447814959997,43.021587,37.117395,7.917033,Buffer Stuffing,On-time Present
+com.example.stickerexplode,26046182,274447921021846,41.956229,35.130242,14.145752,Buffer Stuffing,On-time Present
+com.example.stickerexplode,26045783,274447731615393,41.709648,16.464147,1.888713,SurfaceFlinger Scheduling,Early Present
+com.example.stickerexplode,26046122,274447887254676,41.646180,30.738450,10.528402,Buffer Stuffing,On-time Present
+com.example.stickerexplode,26045645,274447690246415,40.906305,18.205606,8.271078,App Deadline Missed,Late Present
+com.example.stickerexplode,26046069,274447854491532,40.022134,30.636537,10.448852,Buffer Stuffing,On-time Present
+com.example.stickerexplode,26046167,274447910580440,39.240456,31.648481,9.802084,Buffer Stuffing,On-time Present
+com.example.stickerexplode,26046241,274447947558671,38.860201,40.073970,14.331096,Buffer Stuffing,On-time Present
+com.example.stickerexplode,26046107,274447876494014,38.844129,27.602413,10.095988,Buffer Stuffing,On-time Present
+com.example.stickerexplode,26046018,274447823642574,38.232475,31.342486,19.205445,SurfaceFlinger Scheduling,Early Present

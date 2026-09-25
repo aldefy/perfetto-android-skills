@@ -1,0 +1,31 @@
+name,thread_name,n,total_ms,self_ms
+Compose:recompose,.stickerexplode,7,758.966592,243.148205
+EmojiCompat.MetadataRepo.create,EmojiCompatInit,1,131.111409,126.705036
+binder transaction,.stickerexplode,76,111.905881,111.905881
+Extract dex file /data/app/~~bv6Lu28t7uoP-L3cJn68WA==/com.example.stickerexplode-7wD8RW5M-l7zxDyyQ4ec8w==/base.apk,.stickerexplode,3,88.551921,88.551921
+traversal,.stickerexplode,3,1485.569174,77.208407
+Compose:applyChanges,.stickerexplode,6,116.429809,69.056273
+Compiling baseline,Jit thread pool,14,57.891440,54.388871
+Verify dex file /data/app/~~bv6Lu28t7uoP-L3cJn68WA==/com.example.stickerexplode-7wD8RW5M-l7zxDyyQ4ec8w==/base.apk,.stickerexplode,1,42.228760,42.228760
+VerifyClass kotlin.collections.ArraysKt___ArraysKt,.stickerexplode,1,44.137696,41.974447
+binder transaction,EmojiCompatInit,15,37.308839,37.308839
+AndroidOwner:onMeasure,.stickerexplode,2,92.069661,35.944701
+performCreate:com.example.stickerexplode.MainActivity,.stickerexplode,1,238.995077,34.767138
+layout,.stickerexplode,1,40.844930,26.029541
+Compose:onRemembered,.stickerexplode,3,51.220988,23.235434
+driver.CreateDevice,RenderThread,1,22.978312,22.978312
+VerifyClass androidx.compose.ui.platform.AndroidComposeView,.stickerexplode,1,43.790690,20.732465
+Verify dex file /data/app/~~bv6Lu28t7uoP-L3cJn68WA==/com.example.stickerexplode-7wD8RW5M-l7zxDyyQ4ec8w==/base.apk!1,.stickerexplode,1,19.369792,19.369792
+VerifyClass androidx.compose.ui.platform.AndroidComposeViewAccessibilityDelegateCompat,.stickerexplode,1,20.546062,15.654102
+activityStart,.stickerexplode,1,295.469442,14.223960
+preInitBufferAllocator:GraphicBufferAllocator,hwuiTask1,1,18.421224,14.194457
+activityResume,.stickerexplode,1,54.476278,12.832438
+void art::ProfileSaver::GetClassesAndMethodsHelper::CollectInternal(Handle<mirror::ClassLoader>) [kBootClassLoader = false],Profile Saver,3,11.537800,11.537800
+performResume:com.example.stickerexplode.MainActivity,.stickerexplode,1,25.920207,10.821940
+VerifyClass androidx.navigation.compose.NavHostKt,.stickerexplode,1,13.616333,9.973591
+VerifyClass androidx.datastore.preferences.protobuf.MessageSchema,DefaultDispatch,1,10.417928,9.946168
+void art::ProfileSaver::GetClassesAndMethodsHelper::CollectClasses(Thread *),Profile Saver,1,21.357177,9.819377
+VerifyClass androidx.compose.ui.text.TextStyle,.stickerexplode,1,10.135051,9.709800
+void art::ProfileSaver::FetchAndCacheResolvedClassesAndMethods(bool),Profile Saver,1,30.797852,9.440675
+driver.CreateInstance,RenderThread,1,9.372437,9.372437
+VerifyClass androidx.compose.runtime.ComposerImpl,.stickerexplode,1,11.110473,9.358559

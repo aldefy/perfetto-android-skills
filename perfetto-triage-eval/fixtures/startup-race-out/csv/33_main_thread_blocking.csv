@@ -1,0 +1,8 @@
+process_name,state,blocked_function,n,total_ms
+com.example.stickerexplode,Sleeping,-,76,4337.558678
+com.example.stickerexplode,Running,-,728,2154.150613
+com.example.stickerexplode,Runnable,-,620,125.810123
+com.example.stickerexplode,Runnable (Preempted),-,100,57.677569
+com.example.stickerexplode,Uninterruptible Sleep (non-IO),synchronize_rcu_expedited,1,0.076579
+com.example.stickerexplode,Uninterruptible Sleep,-,1,0.045370
+com.example.stickerexplode,Uninterruptible Sleep (non-IO),mmap_read_lock_killable,1,0.007690

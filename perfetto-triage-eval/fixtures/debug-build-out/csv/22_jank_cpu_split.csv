@@ -1,0 +1,3 @@
+process_name,janky_frames,vsync_delay_ms,ui_thread_ms,render_thread_ms
+com.example.stickerexplode,31,308.049659,546.647386,403.611899
+in.equal.ai.assistant.staging,3,33.430654,60.898763,16.947225

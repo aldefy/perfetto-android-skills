@@ -1,0 +1,26 @@
+name,n,total_ms,max_ms
+traversal,121,1316.186120,138.132446
+draw-VRI[MainActivity],121,1177.865812,28.924926
+Drawing  0.00  0.00 1080.00 2424.00,108,1149.784469,23.831462
+postAndWait,121,1109.757976,17.494303
+flush commands,118,984.939692,12.392049
+Vulkan finish frame,118,984.686658,12.389852
+auto skgpu::ganesh::OpsTask::onExecute(GrOpFlushState *)::(anonymous class)::operator()() const,54874,464.540280,7.442749
+animation,126,253.540273,51.537190
+dequeueBuffer,103,202.676180,9.362467
+waitForBufferRelease,40,201.716476,9.352499
+Recomposer:animation,123,161.511479,2.074585
+auto skgpu::ganesh::OpsTask::onPrepare(GrOpFlushState *)::(anonymous class)::operator()() const,57377,147.600450,0.992513
+Choreographer#doFrame - resynced to 26045031 in 23.2ms,1,138.260213,138.260213
+FillRectOp,56957,114.362136,0.262207
+TextureOp,57934,110.590459,1.267415
+Choreographer#doFrame - resynced to 26045902 in 19.9ms,5,81.828205,16.365641
+Recomposer:recompose,121,81.673222,51.358927
+Choreographer#doFrame - resynced to 26045281 in 23.6ms,1,80.630127,80.630127
+DrawFrames 26045981,4,79.822916,19.955729
+DrawFrames 26045856,4,79.464516,19.866129
+Choreographer#doFrame 26046018,4,76.821780,19.205445
+Choreographer#doFrame 26045878,4,75.187664,18.796916
+DrawFrames 26045812,4,71.400064,17.850016
+Choreographer#doFrame - resynced to 26046243 in 22.5ms,5,71.192830,14.238566
+Choreographer#doFrame - resynced to 26046184 in 24.1ms,5,70.240070,14.048014
