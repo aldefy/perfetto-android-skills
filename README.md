@@ -21,6 +21,7 @@ perfetto-triage/
   scripts/
     capture.sh                 pulls a real trace off a connected device (cold-start or interactive)
     triage.py                  parses a trace once, runs the query pack, writes a ranked report
+    remeasure.py                diffs two triage-out directories: findings, jank numbers, self-time hotspots
     ab_startup.sh               adb-only before/after harness when a benchmark module is out of scope
   queries/                    18 PerfettoSQL files, 00_health.sql through 41_anrs.sql
   references/
@@ -68,6 +69,28 @@ python3 perfetto-triage/scripts/triage.py trace.pftrace --pkg com.example.app --
 
 No trace file and no device means nothing runs. This skill will not
 fabricate a measurement. See the hard rules in `SKILL.md`.
+
+## Fix and re-measure
+
+Triage names the problem. It does not touch code. Once you've picked one
+finding and changed one thing (`references/fixes.md` maps finding classes to
+concrete fixes), recapture the identical interaction and diff against the
+baseline:
+
+```bash
+# capture + triage again, same interaction, same device, same build type
+perfetto-triage/scripts/capture.sh com.example.app --interactive 20
+python3 perfetto-triage/scripts/triage.py after.pftrace --pkg com.example.app --out after-out
+
+# diff against the baseline triage-out directory
+python3 perfetto-triage/scripts/remeasure.py triage-out after-out
+```
+
+`remeasure.py` prints resolved findings, new findings, what's still present,
+jank numbers side by side, and the top self-time hotspots side by side. It
+does not collapse this into a single "% improvement" number on purpose.
+Report the median of at least 10 runs, not the best one, or say plainly that
+you didn't.
 
 ## Real numbers, not a toy example
 

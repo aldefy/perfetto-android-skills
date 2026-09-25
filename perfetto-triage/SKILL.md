@@ -155,9 +155,14 @@ Re-run the identical capture and the identical triage, then diff:
 
 ```bash
 python3 scripts/triage.py after.pftrace --pkg com.example.app --out after-out
-diff <(jq -r '.findings[].title' before-out/findings.json) \
-     <(jq -r '.findings[].title' after-out/findings.json)
+python3 scripts/remeasure.py before-out after-out
 ```
+
+`remeasure.py` prints what resolved, what's new, what's still present, the
+jank-summary numbers side by side, and the top self-time hotspots side by
+side. It does not compute a single "% improvement" verdict on purpose — a
+single number invites picking the flattering run out of ten, which is
+exactly what the next paragraph exists to prevent.
 
 Report the **median of ≥10 runs**, not the best run and not the mean. Startup
 distributions have a long right tail; a mean shifted by one thermal outlier is
