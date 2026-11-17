@@ -228,6 +228,29 @@ contributions welcome.
 into the agent's context and ask it to follow the four questions in order.
 We have not verified a specific install path for these yet.
 
+## Other Perfetto skills
+
+`perfetto-triage` is a small fixed first pass for startup, jank and binder:
+the same 20 queries and the same report every run, a capture that refuses a
+build it cannot trust, and a re-measure step after the fix.
+
+There are other good skills in this space. Pick by the job:
+
+| Skill | Good for |
+|---|---|
+| `perfetto-triage` (this repo) | A repeatable first pass on startup, jank and binder, with before/after |
+| [Perfetto AI skill](https://github.com/google/perfetto/tree/main/ai/skills) | Any trace question, with guided workflows for Android memory and GPU |
+| [Android profiler skill](https://github.com/android/skills) | Recording plus root-cause analysis that follows the blocking chain |
+| [premex-ab/claude-marketplace](https://github.com/premex-ab/claude-marketplace) | Android skills packaged as Claude Code plugins |
+
+## Roadmap
+
+- Report Runnable (waiting for a CPU) separately from Sleeping. Today both
+  count as "waiting".
+- Check for throttling and memory pressure before blaming app code.
+- Evals that run an agent with and without the skill.
+- One-command install as a plugin.
+
 ## Talk
 
 **From Trace to Triage: Reading Perfetto, Then Automating It**, first given
