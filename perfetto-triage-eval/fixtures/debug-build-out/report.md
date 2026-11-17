@@ -100,7 +100,7 @@ _no rows_
 | 550 | /vendor/bin/hw/android.hardware.composer.hwc3-service.pixel | 10884 | 6,106.94 |
 | 1544 | system_server | 8050 | 9,085.78 |
 | 2325 | com.android.systemui | 6934 | 1,486.01 |
-| 23567 | in.equal.ai.assistant.staging | 3308 | 2,432.72 |
+| 23567 | com.example.otherapp | 3308 | 2,432.72 |
 | 11335 | com.google.android.apps.nexuslauncher | 2169 | 404.36 |
 | 665 | /vendor/bin/hw/android.hardware.power-service.pixel-libperfmgr | 1105 | 4,626.66 |
 | 24667 | commands.monkey | 771 | 368.35 |
@@ -229,7 +229,7 @@ _(10 more rows in csv/)_
 | process_name | frames | janky | janky_pct | big_jank | huge_jank | worst_overrun_ms | app_jank | sf_jank |
 |---|---|---|---|---|---|---|---|---|
 | com.example.stickerexplode | 32 | 31 | 96.88 | 3 | 0 | 156.49 | 12 | 5 |
-| in.equal.ai.assistant.staging | 6 | 3 | 50.00 | 1 | 0 | 34.77 | 1 | 0 |
+| com.example.otherapp | 6 | 3 | 50.00 | 1 | 0 | 34.77 | 1 | 0 |
 | com.google.android.apps.nexuslauncher | 29 | 0 | 0.00 | 0 | 0 | -11.61 | 0 | 0 |
 | com.android.systemui | 63 | 0 | 0.00 | 0 | 0 | -7.29 | 0 | 0 |
 
@@ -269,7 +269,7 @@ _(10 more rows in csv/)_
 | process_name | janky_frames | vsync_delay_ms | ui_thread_ms | render_thread_ms |
 |---|---|---|---|---|
 | com.example.stickerexplode | 31 | 308.05 | 546.65 | 403.61 |
-| in.equal.ai.assistant.staging | 3 | 33.43 | 60.90 | 16.95 |
+| com.example.otherapp | 3 | 33.43 | 60.90 | 16.95 |
 
 
 #### `23_jank_hot_slices`

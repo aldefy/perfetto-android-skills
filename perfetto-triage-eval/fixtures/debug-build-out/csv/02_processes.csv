@@ -4,7 +4,7 @@ pid,process_name,slices,slice_ms
 550,/vendor/bin/hw/android.hardware.composer.hwc3-service.pixel,10884,6106.940456
 1544,system_server,8050,9085.782613
 2325,com.android.systemui,6934,1486.008230
-23567,in.equal.ai.assistant.staging,3308,2432.719291
+23567,com.example.otherapp,3308,2432.719291
 11335,com.google.android.apps.nexuslauncher,2169,404.361382
 665,/vendor/bin/hw/android.hardware.power-service.pixel-libperfmgr,1105,4626.655616
 24667,commands.monkey,771,368.345016
