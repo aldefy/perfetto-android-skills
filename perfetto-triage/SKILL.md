@@ -141,11 +141,21 @@ Then read the findings. They are ordered by severity and each one carries a
 concrete next action.
 
 To ask a question the pack does not cover, write SQL directly — see
-`references/sql-cookbook.md` for the schema and the idioms that matter:
+`references/sql-cookbook.md` for the schema and the idioms that matter. For
+one question, query the file:
 
 ```bash
 trace_processor query trace.pftrace "INCLUDE PERFETTO MODULE android.startup.startups;
 SELECT * FROM android_startups"
+```
+
+For more than one, load the trace once and keep it loaded. Parsing is the
+slow part, and re-parsing a large trace for every follow-up wastes minutes:
+
+```bash
+trace_processor server unix --name triage --daemonize trace.pftrace
+trace_processor query --remote triage "SELECT count(*) FROM slice"
+trace_processor server kill triage     # when you are done
 ```
 
 ### Step 4 — Map slice names to code
@@ -213,6 +223,12 @@ Write findings as: **observation → evidence → cause → fix → expected eff
 > should return roughly 145 ms.
 
 Never report a number without the device, the build type, and the run count.
+
+Keep measured and inferred apart. Every finding carries a `source`: the query
+stems its numbers came from, re-checkable in `csv/<stem>.csv`. That part is
+measured. The cause you propose and the fix you recommend are inferences, so
+say so. When the trace cannot answer the question, the answer is "unknown",
+with the reason, not a guess.
 
 ## Hard rules
 
