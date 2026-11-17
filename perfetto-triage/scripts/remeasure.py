@@ -223,6 +223,16 @@ def run_metrics(out_dir, pkg):
             v = _num(j.get(key))
             if v is not None:
                 m[label] = v
+    hot = load_csv(out_dir, "23_jank_hot_slices.csv")
+    if hot is not None and j:
+        m["shader compile in late frames (ms)"] = sum(
+            _num(r.get("total_ms")) or 0 for r in hot
+            if re.search(r"CreateGraphicsPipeline|CompileAfterCacheMiss", r.get("name", "")))
+    calls = load_csv(out_dir, "30_binder_main_thread.csv")
+    if calls is not None:
+        m["main-thread binder (ms)"] = sum(
+            _num(r.get("total_ms")) or 0 for r in calls
+            if pkg and pkg != "*" and _matches(r.get("client_process", ""), pkg))
     # the app's own trace sections, when triage was run with --app-repo
     try:
         with open(os.path.join(out_dir, "findings.json")) as fh:

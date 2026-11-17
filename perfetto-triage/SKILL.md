@@ -126,6 +126,14 @@ pack in `queries/`, and writes:
 - `triage-out/findings.json` — a `health_status` block plus the same findings, machine-readable
 - `triage-out/csv/*.csv` — every raw result
 - `triage-out/report.html` — the same findings as a page for a person
+- `triage-out/fix_plan.md` — suggested fixes in order, for you to review (Step 5)
+- `triage-out/progress.txt` — one line saying what triage is doing right now
+
+Tell the person where to look before you start a long run. From the first
+second `report.html` is a small status page that reloads itself and shows the
+current step; it becomes the report when the run finishes. `progress.txt` is
+the same thing in one line. Do not make them ask you whether it is still
+analysing.
 
 `report.html` is what you show the person. It asks the four questions in
 order and answers each with a chart drawn from the query results: the main
@@ -245,6 +253,28 @@ For Compose, enable composition tracing so recomposition slices carry composable
 names; for Flutter and React Native see `references/cross-platform.md`.
 
 ### Step 5 — Fix one thing
+
+Start from `fix_plan.md` (the same list is `fix_plan` in `findings.json` and
+section 5 of `report.html`). Each item says what to change, where if the trace
+can tell, and which number should move. The list is ordered: the capture
+first, then making the app measurable, then fixes whose findings are high or
+medium. Fixes whose findings are only information in this trace are listed
+under "Can wait".
+
+These are suggestions from one trace, not instructions. Review them before
+you act:
+
+1. Read the code each one points at. Drop any that do not apply, and tell the
+   person which you dropped and why.
+2. Take the first one left. One fix per change.
+3. Build before and after from the same build type, trace sections in both.
+4. Capture 10 or more runs per side and compare them with `remeasure.py`.
+5. Raise the fix (a branch, a pull request) only if the number under "Check"
+   comes back `clear` or `likely`. Put that table in the pull request. If it
+   comes back `noise`, say so, and do not ship it as a win.
+
+If the plan says nothing needs fixing now, say that. Do not go looking for
+work in the "Can wait" list unless the person asks for polish.
 
 `references/fixes.md` maps each finding class to concrete fixes. Change **one**
 thing. Batching three fixes and re-measuring once tells you the sum moved; it

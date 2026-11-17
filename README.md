@@ -22,6 +22,7 @@ perfetto-triage/
     triage.py                  parses a trace once, runs the query pack, writes a ranked report
     visual_report.py           turns that output into one self-contained report.html with charts
     code_map.py                checks each hot slice name against the app's source: yours, or not
+    fix_plan.py                turns the findings into suggested fixes, in order, for an agent to review
     remeasure.py                before against after: one run each, or many runs each with medians and a noise verdict
     ab_startup.sh               adb-only before/after harness when a benchmark module is out of scope
   queries/                    20 PerfettoSQL files, 00_health.sql through 41_anrs.sql
@@ -68,7 +69,7 @@ perfetto-triage/scripts/capture.sh com.example.app --stop           # start, run
 # 2. triage — parses once, runs all 20 queries, writes a ranked report
 python3 perfetto-triage/scripts/triage.py trace.pftrace --pkg com.example.app --out triage-out
 
-#    it prints its progress as it goes: load, [n/20] per query, then the report files
+#    it prints its progress as it goes, and triage-out/report.html is a live status page until it finishes
 
 # 3. open triage-out/report.html, or read triage-out/report.md
 #    Trust check first, then findings worst-first
@@ -286,6 +287,20 @@ There are other good skills in this space. Pick by the job:
 | [Perfetto AI skill](https://github.com/google/perfetto/tree/main/ai/skills) | Any trace question, with guided workflows for Android memory and GPU |
 | [Android profiler skill](https://github.com/android/skills) | Recording plus root-cause analysis that follows the blocking chain |
 | [premex-ab/claude-marketplace](https://github.com/premex-ab/claude-marketplace) | Android skills packaged as Claude Code plugins |
+
+## Suggested fixes
+
+Triage ends with a plan, not only a list of findings. `fix_plan.md` (also in
+`findings.json` and section 5 of `report.html`) lists what to change, where if
+the trace can tell, and which number should move. It is ordered: the capture
+first, then making the app measurable, then fixes whose findings are high or
+medium. Anything that is only information in this trace goes under "Can
+wait", so a healthy app gets "nothing needs fixing now" instead of a to-do
+list.
+
+The plan is for review. An agent reads the code, drops what does not apply,
+makes one change, measures again with `remeasure.py`, and raises the fix only
+when the checked number comes back `clear` or `likely`.
 
 ## Works with
 

@@ -180,6 +180,40 @@ def test_write_puts_report_next_to_findings():
     assert dest == os.path.join(out, "report.html") and os.path.getsize(dest) > 5000
 
 
+def test_readings_a_real_run_showed_were_wrong():
+    """Three things a real capture exposed. Each was a confident, wrong sentence."""
+    out = tempfile.mkdtemp(prefix="vr-real-")
+    os.makedirs(os.path.join(out, "csv"))
+    pkg = "com.example.app"
+
+    def write(stem, text):
+        with open(os.path.join(out, "csv", stem + ".csv"), "w") as fh:
+            fh.write(text)
+    # an interactive capture: the main thread mostly sleeps between frames
+    write("33_main_thread_blocking", "process_name,state,blocked_function,n,total_ms\n"
+          f"{pkg},Sleeping,-,100,99000\n{pkg},Running,-,100,18000\n"
+          f"{pkg},Uninterruptible Sleep (IO),folio_wait_bit_common,3,6\n")
+    # 56 of 8527 frames late
+    write("20_jank_summary",
+          "process_name,frames,janky,janky_pct,big_jank,huge_jank,worst_overrun_ms,app_jank,sf_jank\n"
+          f"{pkg},8527,56,0.66,12,0,109,27,15\n")
+    # a frame that overran but carries no jank type
+    write("21_worst_frames", "process_name,frame_id,ts,overrun_ms,cpu_ms,ui_ms,jank_type,present_type\n"
+          f"{pkg},1,1,109,120,2,App Deadline Missed,Late Present\n"
+          f"{pkg},2,2,38,53,15,None,Unspecified Present\n")
+    json.dump({"trace": "t.pftrace", "pkg": pkg, "findings": []},
+              open(os.path.join(out, "findings.json"), "w"))
+    page = vr.render(out)
+    well_formed(page)
+    assert "expected to sleep between frames" in page, "idle sleep is not being blocked"
+    assert "Profiling the app&#x27;s own code will not find that time" not in page
+    assert "Kernel functions the main thread was blocked in" not in page, "6 ms is not worth a chart"
+    assert "Late, not flagged as jank" in page
+    assert ">On time</span></li></ul></div><p class=\"where\">" not in page, \
+        "a frame in the worst-frames chart is never labelled on time"
+    assert "under 1% of frames, which is a low rate" in page
+
+
 # ---- safety ----------------------------------------------------------------
 
 def test_trace_strings_are_escaped():

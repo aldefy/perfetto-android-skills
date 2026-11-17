@@ -51,6 +51,7 @@ TRACE_CALL = re.compile(
         (?:"((?:[^"\\\n]|\\.)*)"|'((?:[^'\\\n]|\\.)*)')""",
     re.X)
 TEMPLATE_PART = re.compile(r"\\\$\\\{[^}]*\\\}|\\\$\w+")
+QUALIFIED = re.compile(r"\b((?:[a-z_][a-z0-9_]*\.){2,})([A-Z][A-Za-z0-9_]*)\b")
 FILE_REF = re.compile(r"\b([A-Za-z_]\w*)\.(kt|java|dart|tsx?|jsx?):(\d+)")
 CLASS_METHOD = re.compile(r"\b([A-Z][A-Za-z0-9_]*)\.([a-z_][A-Za-z0-9_]*)\b")
 TRAILING_ARGS = re.compile(r"[\s:]+[-\d.\s,x]+$")
@@ -76,13 +77,14 @@ def scan_repo(repo: str) -> dict:
     """One pass over the app's source: which class files exist, and every
     string the app hands to a tracing call. Never raises on odd input."""
     index = {"repo": os.path.basename(os.path.abspath(repo)) if repo else "",
-             "root": repo, "files": {}, "sections": [], "scanned": 0}
+             "root": repo, "files": {}, "all_files": {}, "sections": [], "scanned": 0}
     if not repo or not os.path.isdir(repo):
         return index
     for path in _walk(repo):
         rel = os.path.relpath(path, repo)
         stem = os.path.splitext(os.path.basename(path))[0]
         index["files"].setdefault(stem, rel)
+        index["all_files"].setdefault(stem, []).append(rel)
         index["scanned"] += 1
         try:
             if os.path.getsize(path) > MAX_BYTES:
@@ -161,7 +163,7 @@ def section_findings(rows: list[dict]) -> list[dict]:
     top = max(rows, key=lambda r: n(r, "late_frames"))
     if not n(top, "late_frames"):
         return [{
-            "severity": "info", "area": "jank",
+            "severity": "info", "area": "jank", "kind": "late_frames_outside_sections",
             "title": "No late frame overlaps any of the app's trace sections",
             "detail": f"{len(rows)} of the app's sections ran in this trace and "
                       f"{all_late:.0f} frames were late, but never at the same time.",
@@ -174,6 +176,7 @@ def section_findings(rows: list[dict]) -> list[dict]:
         f"{r['section']} ({n(r, 'late_frames'):.0f})" for r in others) + ".")
     return [{
         "severity": "medium" if share >= 25 else "info", "area": "jank",
+        "kind": "late_frames_in_section", "section": top["section"],
         "title": f"{n(top, 'late_frames'):.0f} of {all_late:.0f} late frames overlap {top['section']}",
         "detail": f"That is {share:.0f}% of the late frames, worst {n(top, 'worst_overrun_ms'):.0f} ms "
                   f"over. {inside:.0f} of {all_late:.0f} late frames overlap at least one of the "
@@ -182,6 +185,22 @@ def section_findings(rows: list[dict]) -> list[dict]:
                   "were late. Overlap is not proof it caused them, since a section that is "
                   "simply long overlaps more frames. Narrow it with smaller sections inside it.",
         "source": src}]
+
+
+def _text(index: dict, rel: str) -> str:
+    cache = index.setdefault("_text", {})
+    if rel not in cache:
+        try:
+            cache[rel] = open(os.path.join(index["root"], rel), encoding="utf-8",
+                              errors="replace").read()
+        except OSError:
+            cache[rel] = ""
+    return cache[rel]
+
+
+def _package_of(index: dict, rel: str) -> str | None:
+    m = re.search(r"^\s*package\s+([\w.]+)", _text(index, rel), re.M)
+    return m.group(1) if m else None
 
 
 def _defines(index: dict, stem: str, method: str) -> str | None:
@@ -221,12 +240,15 @@ def classify(name: str, index: dict, pkg: str = "") -> dict:
         where = _defines(index, m.group(1), m.group(2))
         if where:
             return {"owner": "app", "how": "class.method", "evidence": where}
-    base = (pkg or "").rstrip("*").rstrip(".")
-    if base and "." in base and base in clean:
-        tail = clean[clean.index(base) + len(base):]
-        m = re.search(r"\.([A-Z][A-Za-z0-9_]*)", tail)
-        if m and m.group(1) in index["files"]:
-            return {"owner": "app", "how": "app class", "evidence": index["files"][m.group(1)]}
+    # A framework slice that names one of the app's classes in full, such as
+    # performCreate:com.example.app.MainActivity. The class must be a file in
+    # the repo whose own package line matches, so the applicationId (which often
+    # carries a .staging or .debug suffix the code does not) plays no part.
+    for m in QUALIFIED.finditer(clean):
+        package, cls = m.group(1).rstrip("."), m.group(2)
+        for rel in index.get("all_files", {}).get(cls, []):
+            if _package_of(index, rel) == package:
+                return {"owner": "app", "how": "app class", "evidence": rel}
     return {"owner": "other", "how": "not in your source", "evidence": None}
 
 
@@ -275,7 +297,7 @@ def findings(cm: dict) -> list[dict]:
 
     if named:
         return [{
-            "severity": "info", "area": "code",
+            "severity": "info", "area": "code", "kind": "app_slices",
             "title": f"{len(named)} of {cm['checked']} hot slices are named after the app's own code",
             "detail": scope + "These point at a file: " + listed(named) + ".",
             "action": "Start with these. Every other name in the rankings was not found in "
@@ -292,6 +314,7 @@ def findings(cm: dict) -> list[dict]:
                f"ranks, so the slow paths are not the instrumented ones.")
     return [{
         "severity": "medium", "area": "code", "title": title,
+        "kind": "no_trace_sections" if cm["sections_declared"] == 0 else "sections_not_ranked",
         "detail": scope + why + tail,
         "action": "Add androidx.tracing sections, trace(\"Name\") { ... }, around the code "
                   "paths you suspect and capture again. For Compose, turn on composition "

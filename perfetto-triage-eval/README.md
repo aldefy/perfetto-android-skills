@@ -9,6 +9,7 @@ python3 test_logic.py                    # synthetic rows, decision table only
 python3 test_visual_report.py            # report.html: theme discovery, rendering, escaping
 python3 test_code_map.py                 # whose code is a hot slice: positives need evidence
 python3 test_remeasure.py                # many runs per side: medians, spread, noise verdict
+python3 test_fix_plan.py                 # suggested fixes: order, restraint, and the live status files
 python3 synthetic_build_type_check.py    # synthetic trace through trace_processor
 ```
 
