@@ -169,6 +169,15 @@ pass. Act on the verdict:
   time goes; do not quote how much. Say why (the `reasons` list).
 - `not_trustworthy`: stop and fix the capture.
 
+While it runs, triage prints one line per step on stderr: loading the trace,
+each query as `[13/20] 23_jank_hot_slices: 25 rows in 0.4s`, then the report
+files. A step that takes long prints `still running, 40s so far` every 20
+seconds. On a trace of several hundred MB the load and a few queries can take
+minutes; that is slow, not stuck, so relay the current line instead of
+guessing. A query that passes `--query-timeout` (default 600 seconds) is
+abandoned, the run carries on, and the report opens with a blocker saying
+that query did not finish. Never read its empty section as "nothing found".
+
 If the trace was not named by `capture.sh`, pass `--mode startup` or
 `--mode interactive` so a startup capture with no launch is reported as a
 failed capture instead of an empty startup section.

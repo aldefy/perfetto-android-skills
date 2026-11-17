@@ -219,6 +219,49 @@ def every_finding_names_the_query_it_came_from():
     assert missed["source"] == ["10_startup_summary", "01_coverage"], missed["source"]
 
 
+@case
+def unfinished_query_is_a_blocker_not_an_empty_section():
+    out = triage.unfinished_findings({"23_jank_hot_slices": "timed out after 600s",
+                                      "40_slice_hotspots": "line 1\nno such table: foo"})
+    assert [f["severity"] for f in out] == ["blocker", "blocker"], out
+    assert out[0]["title"] == "Query 23_jank_hot_slices did not finish"
+    assert "timed out after 600s" in out[0]["detail"] and "--query-timeout" in out[0]["action"]
+    assert "no such table: foo" in out[1]["detail"]
+    assert all(f["source"] and f["directional_only"] is False for f in out)
+    assert triage.unfinished_findings({}) == []
+
+
+@case
+def slow_step_reports_that_it_is_still_running():
+    import contextlib
+    import io
+    import time
+    buf = io.StringIO()
+    with contextlib.redirect_stderr(buf):
+        with triage.Heartbeat("[13/20] 23_jank_hot_slices", every=0.05):
+            time.sleep(0.22)
+        triage.log("done")
+    lines = buf.getvalue().splitlines()
+    assert sum("still running" in x for x in lines) >= 2, lines
+    assert all(x.startswith("[triage] ") for x in lines), lines
+    assert "[13/20] 23_jank_hot_slices: still running" in lines[0], lines[0]
+
+
+@case
+def a_query_that_times_out_returns_an_error_instead_of_raising():
+    import stat
+    import tempfile
+    d = tempfile.mkdtemp()
+    fake = os.path.join(d, "tp")
+    with open(fake, "w") as fh:
+        fh.write("#!/bin/sh\nsleep 5\n")
+    os.chmod(fake, os.stat(fake).st_mode | stat.S_IEXEC)
+    sess = triage.Session(fake, "/dev/null")
+    sess.remote = False
+    header, rows, err = sess.query_file("/dev/null", timeout=0.2)
+    assert (header, rows) == ([], []) and err == "timed out after 0.2s", err
+
+
 def main():
     failed = 0
     for fn in CASES:
