@@ -21,6 +21,7 @@ perfetto-triage/
     capture.sh                 pulls a real trace off a connected device (cold-start or interactive)
     triage.py                  parses a trace once, runs the query pack, writes a ranked report
     visual_report.py           turns that output into one self-contained report.html with charts
+    code_map.py                checks each hot slice name against the app's source: yours, or not
     remeasure.py                diffs two triage-out directories: findings, jank numbers, self-time hotspots
     ab_startup.sh               adb-only before/after harness when a benchmark module is out of scope
   queries/                    20 PerfettoSQL files, 00_health.sql through 41_anrs.sql
@@ -86,6 +87,16 @@ python3 perfetto-triage/scripts/triage.py trace.pftrace --pkg com.example.app \
 python3 perfetto-triage/scripts/visual_report.py triage-out --app-repo ~/code/app   # re-render only
 python3 perfetto-triage/scripts/visual_report.py --print-theme --app-repo ~/code/app
 ```
+
+`--app-repo` also answers "whose code is this?". Each hot slice name is
+checked against the app's source and marked as the app's own only on
+evidence: a trace section the app declares, a file and line the slice names,
+a `Class.method` the app defines. When nothing matches, the report says so
+plainly and tells you to add trace sections, because a report can only name
+what the app has instrumented.
+
+Lines marked `inference` on the page are the tool's reading of a chart. The
+charts and numbers are measured.
 
 Thread states and frames keep the Perfetto UI's colours, so a strip on the
 page and the track in the trace viewer read the same way. Everything else

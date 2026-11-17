@@ -218,8 +218,18 @@ three places, and each maps back differently:
 | `JIT compiling ...` | ART | the method name is in the slice; Baseline Profile territory |
 | `binder transaction`, `AIDL::java::IFoo::bar` | IPC into another process | find the framework API that wraps it |
 
-So: take the top slice names from `13_startup_top_slices` / `23_jank_hot_slices`
-/ `40_slice_hotspots`, then grep the repo for those literals. If almost nothing
+Pass `--app-repo <path>` to `triage.py` and it does the first pass of this for
+you. Each hot slice name is checked against the app's source and called the
+app's own only on evidence: the string passed to a tracing call, a file and
+line the slice names, a `Class.method` the app defines, or an app class inside
+a framework slice. The result is the "Whose code" table in `report.md`,
+`code_map` in `findings.json`, and a "your code" mark on the bars in
+`report.html`. "Not in your source" describes the search, not the slice: a
+name built at runtime, or code in a dependency, will not be found. Check the
+ones that matter by hand.
+
+Without `--app-repo`: take the top slice names from `13_startup_top_slices` /
+`23_jank_hot_slices` / `40_slice_hotspots`, then grep the repo for those literals. If almost nothing
 matches, that is itself the finding — **the app has no custom tracing**, and the
 first fix is to add `androidx.tracing` sections around the suspicious paths and
 re-capture. You cannot triage what you did not instrument.
@@ -233,6 +243,14 @@ names; for Flutter and React Native see `references/cross-platform.md`.
 thing. Batching three fixes and re-measuring once tells you the sum moved; it
 does not tell you which one paid, and one of them is usually a regression
 hiding behind the other two.
+
+Trace sections are not a fix. They change what you can see, not how fast the
+app runs. When you add them, add them to the before build as well, so the
+only difference between before and after is the fix itself.
+
+Keep the before build. A rebuild overwrites the APK in the build folder, so
+copy it aside (`before.apk`) before you build the fix, then install each in
+turn on the same device.
 
 ### Step 6 — Re-measure and compare
 
@@ -250,6 +268,17 @@ the top self-time hotspots side by side. It does not compute a single
 "% improvement" verdict on purpose — a
 single number invites picking the flattering run out of ten, which is
 exactly what the next paragraph exists to prevent.
+
+If the fix is a Baseline Profile, check that it was compiled before you
+measure. A profile in a sideloaded APK is not compiled at install the way a
+store install is, so the after build can measure the same as the before:
+
+```bash
+adb shell dumpsys package dexopt | grep -A2 com.example.app   # want status=speed-profile
+scripts/ab_startup.sh com.example.app .MainActivity 10 profile   # compiles, then measures
+```
+
+Use the same mode for both builds.
 
 Report the **median of ≥10 runs**, not the best run and not the mean. Startup
 distributions have a long right tail; a mean shifted by one thermal outlier is
