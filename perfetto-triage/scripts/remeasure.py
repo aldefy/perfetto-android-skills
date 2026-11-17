@@ -241,6 +241,10 @@ def run_metrics(out_dir, pkg):
                 v = hot.get(name)
             if v is not None:
                 m[f"your code: {name} (ms)"] = v
+    for r in load_csv(out_dir, "24_jank_by_app_section.csv") or []:
+        v = _num(r.get("late_frames"))
+        if v is not None and r.get("section"):
+            m[f"late frames inside {r['section']}"] = v
     return m
 
 

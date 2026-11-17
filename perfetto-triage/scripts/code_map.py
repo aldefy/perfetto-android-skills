@@ -109,6 +109,81 @@ def scan_repo(repo: str) -> dict:
     return index
 
 
+def _sql_str(text: str) -> str:
+    return "'" + text.replace("'", "''") + "'"
+
+
+def _glob_escape(text: str) -> str:
+    """Make *, ? and [ literal in a GLOB pattern."""
+    return re.sub(r"([*?\[])", r"[\1]", text)
+
+
+def section_match_sql(index: dict, column: str = "s.name", limit: int = 400) -> str | None:
+    """A SQL condition that is true for slices named after one of the app's
+    trace sections. None when the app declares none."""
+    literals, globs = [], []
+    for sec in index.get("sections", []):
+        lit = sec["literal"]
+        if "\n" in lit or "\x00" in lit:
+            continue
+        if sec["pattern"] is None:
+            if lit not in literals:
+                literals.append(lit)
+        else:
+            # trace("checkout.$name") -> GLOB 'checkout.*'
+            parts = re.split(r"\$\{[^}]*\}|\$\w+", lit)
+            pattern = "*".join(_glob_escape(p) for p in parts)
+            if pattern.replace("*", "") and pattern not in globs:
+                globs.append(pattern)
+    literals, globs = literals[:limit], globs[:limit]
+    clauses = []
+    if literals:
+        clauses.append(f"{column} IN ({', '.join(_sql_str(x) for x in literals)})")
+    clauses.extend(f"{column} GLOB {_sql_str(g)}" for g in globs)
+    return " OR ".join(clauses) if clauses else None
+
+
+def section_findings(rows: list[dict]) -> list[dict]:
+    """rows: 24_jank_by_app_section as dicts. What to say about them."""
+    if not rows:
+        return []
+
+    def n(row, key):
+        try:
+            return float(row.get(key) or 0)
+        except ValueError:
+            return 0.0
+    all_late = n(rows[0], "all_late_frames")
+    inside = n(rows[0], "late_frames_in_any_section")
+    if not all_late:
+        return []
+    src = ["24_jank_by_app_section"]
+    top = max(rows, key=lambda r: n(r, "late_frames"))
+    if not n(top, "late_frames"):
+        return [{
+            "severity": "info", "area": "jank",
+            "title": "No late frame overlaps any of the app's trace sections",
+            "detail": f"{len(rows)} of the app's sections ran in this trace and "
+                      f"{all_late:.0f} frames were late, but never at the same time.",
+            "action": "The late frames come from work that is not inside a section yet. "
+                      "Wrap the screens or transitions you suspect and capture again.",
+            "source": src}]
+    share = 100.0 * n(top, "late_frames") / all_late
+    others = [r for r in rows if r is not top and n(r, "late_frames")][:3]
+    more = ("" if not others else " Next: " + ", ".join(
+        f"{r['section']} ({n(r, 'late_frames'):.0f})" for r in others) + ".")
+    return [{
+        "severity": "medium" if share >= 25 else "info", "area": "jank",
+        "title": f"{n(top, 'late_frames'):.0f} of {all_late:.0f} late frames overlap {top['section']}",
+        "detail": f"That is {share:.0f}% of the late frames, worst {n(top, 'worst_overrun_ms'):.0f} ms "
+                  f"over. {inside:.0f} of {all_late:.0f} late frames overlap at least one of the "
+                  f"app's sections." + more,
+        "action": "Look at this section first: it is the app's own code running while frames "
+                  "were late. Overlap is not proof it caused them, since a section that is "
+                  "simply long overlaps more frames. Narrow it with smaller sections inside it.",
+        "source": src}]
+
+
 def _defines(index: dict, stem: str, method: str) -> str | None:
     """'path:line' where the class file defines the method, else None."""
     rel = index["files"].get(stem)
@@ -155,9 +230,9 @@ def classify(name: str, index: dict, pkg: str = "") -> dict:
     return {"owner": "other", "how": "not in your source", "evidence": None}
 
 
-def build(results: dict, repo: str, pkg: str = "") -> dict:
+def build(results: dict, repo: str, pkg: str = "", index: dict | None = None) -> dict:
     """results: {stem: (header, rows)} as triage.py holds them."""
-    index = scan_repo(repo)
+    index = index if index is not None else scan_repo(repo)
     merged: dict[str, dict] = {}
     for stem, name_col, ms_col in STEMS:
         header, rows = results.get(stem, ([], []))

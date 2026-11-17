@@ -51,11 +51,14 @@ def run_dir(parent, name, ttid, janky_pct=10.0, section_ms=None, verdict="truste
             "health_status": {"verdict": verdict, "build_type": build}}
     if section_ms is not None:
         write("13_startup_top_slices", "startup_id,slice_name,n,total_ms,max_ms\n"
-                                       f"1,v3.stage.orb,1,{section_ms},{section_ms}\n"
+                                       f"1,checkout.stage.pay,1,{section_ms},{section_ms}\n"
                                        "1,traversal,3,90,40\n")
         data["code_map"] = {"slices": [
-            {"name": "v3.stage.orb", "how": "trace section", "owner": "app"},
+            {"name": "checkout.stage.pay", "how": "trace section", "owner": "app"},
             {"name": "traversal", "how": "not in your source", "owner": "other"}]}
+        write("24_jank_by_app_section",
+              "section,times_run,total_ms,late_frames,all_late_frames,late_frames_in_any_section,worst_overrun_ms\n"
+              f"checkout.stage.pay,1,{section_ms},{int(section_ms // 10)},10,8,40\n")
     with open(os.path.join(d, "findings.json"), "w") as fh:
         json.dump(data, fh)
     return d
@@ -109,9 +112,11 @@ def test_picks_the_apps_row_not_the_first_row():
 def test_the_apps_own_sections_get_a_row():
     before, after = side("b", [300, 301, 302], section_ms=80), side("a", [300, 301, 302], section_ms=35)
     rows = rm.summarise(before, after, PKG)
-    r = row(rows, "your code: v3.stage.orb (ms)")
+    r = row(rows, "your code: checkout.stage.pay (ms)")
     assert r["before"]["median"] == 80 and r["after"]["median"] == 35 and r["verdict"] == "clear", r
     assert not any("traversal" in x["metric"] for x in rows), "framework slices get no row"
+    late = row(rows, "late frames inside checkout.stage.pay")
+    assert late["before"]["median"] == 8 and late["after"]["median"] == 3 and late["verdict"] == "clear"
 
 
 def test_a_folder_of_runs_expands():
