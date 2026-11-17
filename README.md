@@ -22,6 +22,7 @@ perfetto-triage/
     triage.py                  parses a trace once, runs the query pack, writes a ranked report
     visual_report.py           turns that output into one self-contained report.html with charts
     code_map.py                checks each hot slice name against the app's source: yours, or not
+    code_audit.py              reads the code that ran during the capture for causes that match the findings
     fix_plan.py                turns the findings into suggested fixes, in order, for an agent to review
     remeasure.py                before against after: one run each, or many runs each with medians and a noise verdict
     ab_startup.sh               adb-only before/after harness when a benchmark module is out of scope

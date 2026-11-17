@@ -15,6 +15,9 @@ Outputs into --out (default ./triage-out):
                  Perfetto UI's colours, each with a plain explanation
   fix_plan.md    suggested fixes in order, for an agent to review before it
                  changes anything (also `fix_plan` in findings.json)
+  code_audit.md  with --app-repo: the code that ran during the capture, read
+                 for causes that match what the trace measured. Candidates
+                 with file and line (also `code_audit` in findings.json)
   progress.txt   one line saying what triage is doing right now
   csv/*.csv      raw result of every query
 
@@ -329,6 +332,36 @@ COVERAGE_COLUMNS = [
 ]
 
 
+# Stats that trace_processor files under "error" but that do not change a
+# number in the report. Each maps to the plain reason.
+BENIGN_STATS = {
+    "config_write_into_file_no_flush":
+        "The trace was streamed to a file with no flush period set. trace_processor "
+        "then has to hold the whole trace in memory to read it. No data is lost.",
+}
+
+ANDROID_RELEASE = {24: "7.0", 25: "7.1", 26: "8.0", 27: "8.1", 28: "9", 29: "10", 30: "11",
+                   31: "12", 32: "12L", 33: "13", 34: "14", 35: "15", 36: "16"}
+FRAME_TIMELINE_SDK = 31     # Android 12: the first release that records frame deadlines
+
+
+def device_info(cov_row: dict | None) -> dict:
+    """{'sdk': int|None, 'android': '10'|None} from 01_coverage. The SDK level
+    comes from the trace's own metadata, or failing that from the release field
+    of the build fingerprint (brand/product/device:RELEASE/ID/...)."""
+    row = cov_row or {}
+    sdk = num(row.get("android_sdk"))
+    sdk = int(sdk) if sdk else None
+    release = ANDROID_RELEASE.get(sdk) if sdk else None
+    if sdk is None:
+        m = re.search(r":([0-9]+(?:\.[0-9]+)?)(?:\.[0-9]+)*/", str(row.get("build_fingerprint") or ""))
+        if m:
+            release = m.group(1)
+            sdk = next((k for k, v in ANDROID_RELEASE.items()
+                        if v == release or v == release.split(".")[0]), None)
+    return {"sdk": sdk, "android": release}
+
+
 def infer_mode(trace_path: str) -> str:
     """capture.sh names traces <pkg>-<mode>-<stamp>.pftrace. Anything else is
     'unknown': we do not guess what the person meant to capture."""
@@ -351,6 +384,10 @@ def health_status(results: dict, pkg: str, mode: str = "unknown") -> dict:
       coverage.<src>   ok | missing | unknown       (01_coverage: zero = missing)
       build_type       release | debuggable | unknown   (03_build_type)
       startup_capture  ok | missed | not_expected | unknown   (10_startup_summary)
+      frames           measured | not_recorded | unsupported | unknown
+                       unsupported: the phone is older than Android 12, which
+                       is the first release with a frame timeline
+      device           {sdk, android}, None where the trace does not say
       verdict          trusted | directional_only | not_trustworthy
     """
     def table(stem):
@@ -364,11 +401,16 @@ def health_status(results: dict, pkg: str, mode: str = "unknown") -> dict:
     if "00_health" not in results:
         hs["trace_health"] = "unknown"
         reasons.append("00_health did not run")
-    elif table("00_health"):
-        hs["trace_health"] = "fail"
-        reasons.append("trace_processor reported errors or dropped data")
     else:
-        hs["trace_health"] = "pass"
+        rows = table("00_health")
+        benign = [r.get("name") for r in rows if r.get("name") in BENIGN_STATS]
+        if len(benign) < len(rows):
+            hs["trace_health"] = "fail"
+            reasons.append("trace_processor reported errors or dropped data")
+        else:
+            hs["trace_health"] = "pass"
+        if benign:
+            hs["trace_health_notes"] = benign
 
     # 01_coverage: a ZERO in a column is the bad case.
     cov = table("01_coverage")
@@ -382,6 +424,11 @@ def health_status(results: dict, pkg: str, mode: str = "unknown") -> dict:
         reasons.append("01_coverage did not run")
     # Gaps scope what the trace can answer. Only sched/slices decide the verdict.
     hs["coverage_gaps"] = [k for k, v in hs["coverage"].items() if v == "missing"]
+    hs["device"] = device_info(cov[0] if cov else None)
+    sdk = hs["device"]["sdk"]
+    ft = hs["coverage"].get("frametimeline", "unknown")
+    hs["frames"] = ("measured" if ft == "ok" else "unknown" if ft == "unknown"
+                    else "unsupported" if sdk and sdk < FRAME_TIMELINE_SDK else "not_recorded")
 
     # 03_build_type: needs a named package. With --pkg '*' every package on the
     # device matches, and "is the app under test debuggable" has no answer.
@@ -446,12 +493,15 @@ KINDS = [
     (r"^Debuggable build", "debuggable_build"),
     (r"^Build type not verified", "build_unknown"),
     (r"^No FrameTimeline data", "no_frametimeline"),
+    (r"^Late frames cannot be measured", "frames_unsupported"),
+    (r"^Trace was written without a flush period", "no_flush_period"),
+    (r"^The JIT compiler ran for", "jit_compile"),
     (r"^No kernel blocking reasons", "no_blocked_reasons"),
     (r"^No scheduler data", "no_sched"),
     (r"^Startup capture missed", "startup_missed"),
     (r"^No app launch found", "startup_not_found"),
     (r"^Cold start TTID is", "slow_cold_start"),
-    (r" start TTID is ", "slow_start"),
+    (r" start TTID is |^Start TTID is ", "slow_start"),
     (r"never calls reportFullyDrawn", "no_ttfd"),
     (r"^Startup time is dominated by", "startup_dominated"),
     (r"^Startup is waiting-bound", "startup_waiting"),
@@ -500,12 +550,19 @@ def analyse(results: dict, pkg: str, mode: str = "unknown",
 
     # --- 0. Is the trace trustworthy and complete? ------------------------
     health = table("00_health")
-    if health:
-        names = ", ".join(f"{r['name']}={r['value']}" for r in health[:5])
+    lossy = [r for r in health if r.get("name") not in BENIGN_STATS]
+    if lossy:
+        names = ", ".join(f"{r['name']}={r['value']}" for r in lossy[:5])
         add("blocker", "trace", "Trace has errors or dropped data",
             f"trace_processor stats reported: {names}",
             "Re-record with a bigger buffer (-b 256mb) or a shorter duration. "
             "Numbers from a lossy trace are not comparable across runs.")
+    if any(r.get("name") == "config_write_into_file_no_flush" for r in health):
+        add("info", "trace", "Trace was written without a flush period",
+            BENIGN_STATS["config_write_into_file_no_flush"] + " The numbers in this "
+            "report are not affected.",
+            "Nothing to redo. capture.sh --start sets flush_period_ms on Android 12 "
+            "and newer, so this only shows on older phones or with your own config.")
 
     if hs["build_type"] == "debuggable":
         src[:] = ["03_build_type"]
@@ -528,7 +585,18 @@ def analyse(results: dict, pkg: str, mode: str = "unknown",
     cov = table("01_coverage")
     if cov:
         c = cov[0]
-        if (num(c.get("frametimeline_rows")) or 0) == 0:
+        if (num(c.get("frametimeline_rows")) or 0) == 0 and hs.get("frames") == "unsupported":
+            rel = hs["device"].get("android") or f"API {hs['device'].get('sdk')}"
+            add("info" if mode == "startup" else "medium", "jank",
+                f"Late frames cannot be measured on this phone (Android {rel})",
+                "The frame timeline, which records each frame's deadline and who missed "
+                "it, exists from Android 12. This trace counts the frames the app drew "
+                "but has no deadline for any of them, so it cannot say one was late. "
+                "A frame count with zero late frames here means no data, not smooth.",
+                "Use a phone on Android 12 or newer to measure jank. Startup, thread "
+                "state, binder and slice numbers from this trace are not affected."
+                + ("" if mode == "startup" else " Do not report a jank result from this capture."))
+        elif (num(c.get("frametimeline_rows")) or 0) == 0:
             add("blocker", "jank", "No FrameTimeline data in this trace",
                 "actual_frame_timeline_slice is empty, so no jank attribution is possible.",
                 "Re-record with the android.surfaceflinger.frametimeline data source "
@@ -598,6 +666,15 @@ def analyse(results: dict, pkg: str, mode: str = "unknown",
                 "Google Play flags cold starts over 5 s as bad and over 2 s as "
                 "sluggish; a well-tuned app lands under 500 ms. See the breakdown below "
                 "for where it goes.")
+        elif ttid and kind in (NULL, None, "") and ttid > 500:
+            add("medium", "startup", f"Start TTID is {ttid:.0f} ms (start type not recorded)",
+                f"{s.get('package')} startup_id={s.get('startup_id')} "
+                f"time-to-initial-display {ttid:.0f} ms. This trace does not say whether "
+                "the start was cold, warm or hot"
+                + (", but capture.sh force-stops the app first, so treat it as cold."
+                   if mode == "startup" else "."),
+                "A well-tuned cold start lands under 500 ms. Compare runs of the same "
+                "kind only: a warm start is always faster than a cold one.")
         elif ttid and ttid > 1000:
             add("medium", "startup", f"{kind} start TTID is {ttid:.0f} ms",
                 f"{s.get('package')} startup_id={s.get('startup_id')}.",
@@ -694,7 +771,9 @@ def analyse(results: dict, pkg: str, mode: str = "unknown",
             return sev
         return sev if rank[sev] >= rank[jank_cap] else jank_cap
 
-    for r in table("20_jank_summary"):
+    # Without a frame timeline every frame reads "0 late". That is missing data.
+    no_deadlines = hs.get("frames") in ("unsupported", "not_recorded")
+    for r in ([] if no_deadlines else table("20_jank_summary")):
         if pkg not in ("*", "") and not _glob(r.get("process_name", ""), pkg):
             continue
         frames = num(r.get("frames")) or 0
@@ -778,11 +857,16 @@ def analyse(results: dict, pkg: str, mode: str = "unknown",
         worst = binder[0]
         tot = num(worst.get("total_ms")) or 0
         if tot > 20:
+            named = worst.get("aidl_name") not in (None, "", NULL, "unknown")
+            what = worst.get("aidl_name") if named else f"calls to {worst.get('server_process')}"
             add("high" if tot > 100 else "medium", "binder",
-                f"Main-thread binder: {worst.get('aidl_name')} costs {tot:.0f} ms",
+                f"Main-thread binder: {what} cost{'s' if named else ''} {tot:.0f} ms",
                 f"{worst.get('n')} synchronous calls from {worst.get('client_process')} "
                 f"to {worst.get('server_process')}, worst single call "
-                f"{num(worst.get('max_ms')) or 0:.1f} ms.",
+                f"{num(worst.get('max_ms')) or 0:.1f} ms."
+                + ("" if named else " This trace does not name the interface, so the "
+                   "server process is the only lead: search the code on this path for "
+                   "the framework APIs that process serves."),
                 "Synchronous binder on the main thread is a frozen UI. Cache the result, "
                 "batch the calls, or move them to a background dispatcher. System APIs that "
                 "look local (PackageManager, ConnectivityManager, DisplayManager, "
@@ -810,6 +894,28 @@ def analyse(results: dict, pkg: str, mode: str = "unknown",
                 "Classic invisible stall: nothing is 'running' so CPU profilers show "
                 "nothing. Shrink the critical section, or move the shared state behind "
                 "an actor / single-threaded dispatcher.")
+
+    # --- 3b. JIT ------------------------------------------------------------
+    # Code compiled ahead of time (from a Baseline Profile or a cloud profile)
+    # does not go through the JIT. Seconds of JIT in a short capture usually
+    # mean the install under test has no compiled profile, which is common for
+    # a sideloaded build and makes it slower than what store users get.
+    cov_row = (table("01_coverage") or [{}])[0]
+    span = num(cov_row.get("trace_span_ms")) or 0
+    jit = sum(num(r.get("total_ms")) or 0 for r in table("40_slice_hotspots")
+              if r.get("name") == "Compiling" and str(r.get("thread_name", "")).startswith("Jit thread"))
+    if jit >= 500 and span and jit >= 0.10 * span:
+        add("medium", "runtime",
+            f"The JIT compiler ran for {jit:,.0f} ms, {100 * jit / span:.0f}% of the capture",
+            "That is the time in 'Compiling' slices on the app's JIT thread. Code that "
+            "was compiled ahead of time does not need the JIT, so this much of it "
+            "usually means the install under test has no compiled profile. A build "
+            "installed with adb is not compiled the way a store install is.",
+            "Check how the app is compiled: adb shell dumpsys package dexopt | grep -A2 <pkg>. "
+            "If it does not say speed-profile, compile it before measuring: adb shell cmd "
+            "package compile -f -m speed-profile <pkg>. That only helps when the APK "
+            "carries a Baseline Profile, so add one if the app has none. Then capture "
+            "again: every number in this report was taken on uncompiled code.")
 
     # --- 4. ANR -----------------------------------------------------------
     anrs = table("41_anrs")
@@ -906,16 +1012,23 @@ def trust_table(hs: dict) -> list[str]:
             "not_expected": "n/a"}
     rows = [("Trace health (`00_health`)", hs["trace_health"],
              "zero error rows is the pass case")]
+    unsupported = hs.get("frames") == "unsupported"
     for key, val in hs["coverage"].items():
-        rows.append((f"Coverage: {key} (`01_coverage`)", val,
-                     "zero rows means that data source was never recorded"))
+        note = "zero rows means that data source was never recorded"
+        if val == "missing" and key == "frametimeline" and unsupported:
+            note = (f"this phone runs Android {hs['device'].get('android')}; frame "
+                    "deadlines are recorded from Android 12")
+        rows.append((f"Coverage: {key} (`01_coverage`)", val, note))
     rows.append(("Build type (`03_build_type`)", hs["build_type"],
                  hs.get("build_type_detail", "")))
     rows.append(("Startup capture (`10_startup_summary`)", hs["startup_capture"],
                  f"capture mode: {hs['mode']}"))
     out = ["| Check | Result | Status | Note |", "|---|---|---|---|"]
     for name, val, note in rows:
-        out.append(f"| {name} | {mark.get(val, 'UNKNOWN')} | `{val}` | {note} |")
+        # A missing data source fails the verdict only when it is a core one.
+        word = ("GAP" if val == "missing" and "sched" not in name and "slices" not in name
+                else mark.get(val, "UNKNOWN"))
+        out.append(f"| {name} | {word} | `{val}` | {note} |")
     out.append("")
     verdict = {"trusted": "**Verdict: trusted.** Numbers below can be quoted with "
                           "the device, build type and run count.",
@@ -929,7 +1042,10 @@ def trust_table(hs: dict) -> list[str]:
         out.append("Why: " + "; ".join(hs["reasons"]) + ".")
     if hs.get("coverage_gaps"):
         out.append("")
-        out.append("Not answerable from this trace: " + ", ".join(hs["coverage_gaps"]) + ".")
+        out.append("Not answerable from this trace: " + ", ".join(hs["coverage_gaps"]) + "."
+                   + (" Late frames cannot be measured on this phone at all: a frame count "
+                      "with zero late frames below is missing data, not a smooth result."
+                      if unsupported else ""))
     return out
 
 
@@ -981,6 +1097,10 @@ def main():
                     help="the app's source tree. Hot slice names are checked against it, "
                          "so the report says which ones are the app's own code, and "
                          "report.html takes its colours from the app's theme tokens.")
+    ap.add_argument("--flow", default="",
+                    help="with --app-repo: the screens that were driven during the capture, "
+                         "comma-separated (Home,TripDetail). Their source files join the "
+                         "code that is audited for causes. Not needed for a cold start.")
     ap.add_argument("--query-timeout", type=float, default=600,
                     help="seconds one query may run before it is abandoned and "
                          "reported as not finished (default 600)")
@@ -1079,13 +1199,34 @@ def main():
             log(f"code map skipped: {exc}")
     findings = sorted(findings + extra, key=lambda x: order.get(x["severity"], 9))
 
+    audit, audit_md, amod = None, "", None
+    if cmod and index and index.get("scanned"):
+        log("auditing the code on the profiled path")
+        try:  # reads source only, and must never fail a triage
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                "code_audit", os.path.join(HERE, "code_audit.py"))
+            amod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(amod)
+            servers = [r.get("server_process", "") for r in
+                       as_dicts(*results.get("30_binder_main_thread", ([], [])))
+                       if (num(r.get("total_ms")) or 0) >= 5
+                       and (args.pkg in ("*", "") or _glob(r.get("client_process", ""), args.pkg))]
+            flow = [x.strip() for x in args.flow.split(",") if x.strip()]
+            audit = amod.audit(index, findings, mode, flow, code_map, servers, args.pkg)
+            audit_md = amod.to_markdown(audit)
+            log(audit["summary"])
+        except Exception as exc:
+            log(f"code audit skipped: {exc}")
+            audit = None
+
     plan, plan_md = None, ""
     try:  # suggestions on top of the findings; they must never fail a triage
         import importlib.util
         spec = importlib.util.spec_from_file_location("fix_plan", os.path.join(HERE, "fix_plan.py"))
         fmod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(fmod)
-        plan = fmod.build(findings, status, code_map, handoffs)
+        plan = fmod.build(findings, status, code_map, handoffs, audit)
         plan_md = fmod.to_markdown(plan)
     except Exception as exc:
         log(f"fix plan skipped: {exc}")
@@ -1120,6 +1261,9 @@ def main():
         out.append("")
     if plan_md:
         out.append(plan_md)
+        out.append("")
+    if audit_md:
+        out.append(audit_md)
         out.append("")
     if code_map and code_map.get("checked"):
         out.append("## Whose code")
@@ -1177,6 +1321,9 @@ def main():
     if plan:
         with open(os.path.join(args.out, "fix_plan.md"), "w") as fh:
             fh.write(fmod.to_markdown(plan, "# Suggested fixes") + "\n")
+    if audit:
+        with open(os.path.join(args.out, "code_audit.md"), "w") as fh:
+            fh.write(amod.to_markdown(audit, "# Code on the profiled path") + "\n")
     with open(os.path.join(args.out, "findings.json"), "w") as fh:
         payload = {"trace": args.trace, "pkg": args.pkg, "mode": mode,
                    "health_status": status, "findings": findings}
@@ -1184,6 +1331,8 @@ def main():
             payload["code_map"] = code_map
         if handoffs:
             payload["handoffs"] = handoffs
+        if audit:
+            payload["code_audit"] = audit
         if plan:
             payload["fix_plan"] = plan
         json.dump(payload, fh, indent=2)
@@ -1210,6 +1359,8 @@ def main():
     print(f"{len(findings)} finding(s). Report: {report}")
     if plan:
         print(f"Fix plan: {os.path.join(args.out, 'fix_plan.md')}. {plan['summary']}")
+    if audit:
+        print(f"Code audit: {os.path.join(args.out, 'code_audit.md')}. {audit['summary']}")
     if visual:
         print(f"Visual report: {visual}")
     for f in findings[:8]:

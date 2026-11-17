@@ -141,8 +141,9 @@ SDK=$(adb shell getprop ro.build.version.sdk | tr -d '\r')
 MODEL=$(adb shell getprop ro.product.model | tr -d '\r')
 echo "[capture] device: $MODEL (API $SDK)"
 if (( SDK < 31 )); then
-  echo "[capture] WARNING: API $SDK < 31. FrameTimeline is unavailable, so jank" \
-       "attribution will be empty. Startup and binder analysis still work."
+  echo "[capture] WARNING: API $SDK is older than Android 12 (API 31), which is the" \
+       "first release that records frame deadlines. Late frames cannot be measured" \
+       "on this phone. Startup, thread state and binder analysis still work."
 fi
 if ! adb shell pm list packages | tr -d '\r' | grep -x "package:$PKG" >/dev/null; then
   echo "[capture] ERROR: $PKG is not installed on this device." >&2
@@ -178,14 +179,26 @@ fi
 adb shell svc power stayon usb >/dev/null 2>&1 || true
 adb shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
 
+# The perfetto on the phone rejects a config field it does not know, and the
+# capture then fails with no trace at all. Seen on Android 10 for these two.
+# Neither is needed by any query: CPU frequency also arrives as an ftrace event.
+fit_to_device() {
+  if (( SDK < 31 )); then grep -Ev 'symbolize_ksyms|cpufreq_period_ms'; else cat; fi
+}
+
 if [[ "$ACTION" == "start" ]]; then SECS="$MAX"; fi
 sed "s/atrace_apps: \"\\*\"/atrace_apps: \"$PKG\"\\n      atrace_apps: \"system_server\"/" "$CFG" \
-  | sed "s/duration_ms: 20000/duration_ms: $((SECS * 1000))/" > /tmp/triage-cfg.pbtxt
+  | sed "s/duration_ms: 20000/duration_ms: $((SECS * 1000))/" \
+  | fit_to_device > /tmp/triage-cfg.pbtxt
 
 if [[ "$ACTION" == "start" ]]; then
   # A flow of unknown length can outgrow the ring buffer, which would silently
   # overwrite its own beginning. Stream the buffer to the file as we go.
   printf 'write_into_file: true\nfile_write_period_ms: 2500\n' >> /tmp/triage-cfg.pbtxt
+  # With a flush period trace_processor can read the file in pieces. Without
+  # one it reports config_write_into_file_no_flush and loads it all at once.
+  # Left off below Android 12, where the field has not been tried.
+  if (( SDK >= 31 )); then printf 'flush_period_ms: 5000\n' >> /tmp/triage-cfg.pbtxt; fi
 
   echo "[capture] starting trace (stops by itself after ${MAX}s)"
   # shellcheck disable=SC2002

@@ -165,6 +165,27 @@ def test_one_run_each_still_works_from_the_command_line():
     assert bad.returncode != 0 and "give both --before and --after" in bad.stderr
 
 
+
+
+def test_frames_with_no_deadlines_are_not_compared():
+    """A phone older than Android 12 records no frame deadlines. Every run then
+    reads 0% late, and comparing them would report 'no change' for something
+    that was never measured."""
+    parent = tempfile.mkdtemp(prefix="rm-old-")
+    d = run_dir(parent, "old", 700, janky_pct=0.0)
+    with open(os.path.join(d, "csv", "01_coverage.csv"), "w") as fh:
+        fh.write("slices,sched_rows,frametimeline_rows,blocked_reason_rows,binder_slices\n9000,500,0,0,30\n")
+    with open(os.path.join(d, "csv", "40_slice_hotspots.csv"), "w") as fh:
+        fh.write("name,thread_name,n,total_ms,self_ms\nCompiling,Jit thread pool,600,1844,1844\n"
+                 "draw,main,500,2000,2000\n")
+    m = rm.run_metrics(d, PKG)
+    assert "late frames (%)" not in m and "worst overrun (ms)" not in m, m
+    assert m["frames"] == 100 and m["cold start TTID (ms)"] == 700
+    assert m["JIT compile (ms)"] == 1844
+    new = run_dir(parent, "new", 700)
+    assert "late frames (%)" in rm.run_metrics(new, PKG), "no coverage file means an older triage: keep it"
+
+
 CASES = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
 
 

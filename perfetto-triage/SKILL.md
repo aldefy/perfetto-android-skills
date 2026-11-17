@@ -74,7 +74,15 @@ Wi-Fi shows up twice). Ask which one, then pass `--serial <id>`.
 This pushes `assets/startup_jank.pbtxt` to the device. Use that config, not the
 lightweight `adb shell perfetto <categories>` form: the lightweight form cannot
 enable `android.surfaceflinger.frametimeline`, so you get no jank attribution
-at all. FrameTimeline needs Android 12+.
+at all.
+
+The phone's Android version decides what can be measured. Frame deadlines are
+recorded from Android 12 (API 31). On an older phone `capture.sh` says so,
+drops the config fields that phone's perfetto rejects, and still captures
+startup, thread state and binder. Triage then reports late frames as "cannot
+be measured on this phone". Never read a frame count from such a trace as
+"0 late": it is missing data. An old, slow phone is a fair worst case for cold
+start. For jank, use an Android 12+ phone.
 
 Capture hygiene, because a bad capture wastes the whole session:
 
@@ -127,6 +135,8 @@ pack in `queries/`, and writes:
 - `triage-out/csv/*.csv` — every raw result
 - `triage-out/report.html` — the same findings as a page for a person
 - `triage-out/fix_plan.md` — suggested fixes in order, for you to review (Step 5)
+- `triage-out/code_audit.md` — with `--app-repo`: the code that ran during the
+  capture, read for causes that match the findings (Step 4)
 - `triage-out/progress.txt` — one line saying what triage is doing right now
 
 Tell the person where to look before you start a long run. From the first
@@ -243,6 +253,60 @@ counts the late frames that overlap each section, the report draws them as
 section its own before/after row. Overlap is not blame: a long section
 overlaps more frames. Use it to decide where to add smaller sections next.
 
+#### Audit the code on the path you profiled
+
+A trace says what was slow. It rarely names the line. So `--app-repo` also
+reads the code that ran during the capture and looks in it for causes that
+match what the trace measured. The result is `code_audit.md`, `code_audit` in
+`findings.json`, and the candidates listed under each suggestion in
+`fix_plan.md` and section 5 of `report.html`.
+
+The path is worked out like this:
+
+- A cold start runs the Application class, the startup initializers and the
+  launcher Activity from `AndroidManifest.xml`, then the app code those refer
+  to, two steps out. Nothing more is needed from you.
+- A flow you drove runs the screens you opened. The trace does not name them
+  unless the app has trace sections, so say which ones:
+
+```bash
+python3 scripts/triage.py trace.pftrace --pkg com.example.app \
+    --app-repo /path/to/app --flow Home,TripDetail,Checkout
+```
+
+  Use the screen names as they appear in the code. Each name is matched to
+  source files, and the ones that match nothing are reported. If you scripted
+  the flow, you already know this list: pass it every time.
+- Any app class or file the trace itself names is added.
+
+The audit then checks those files against the findings. Each check runs only
+when a finding asks for it: system-service and telephony calls when the trace
+shows main-thread binder time, blocking calls and SDK set-up when startup is
+slow or waiting, never-ending animations and unkeyed lazy lists when Compose
+work or late frames rank, a missing Baseline Profile when the JIT was busy,
+a missing `reportFullyDrawn` when there is no TTFD, and where to put trace
+sections when the app has none.
+
+Every item is a candidate. It is a pattern match in source: it cannot see
+which thread a line runs on, or whether the line ran at all. A line with a
+background dispatcher just above it is flagged as probably fine. Before you
+tell the person something is the cause:
+
+1. Open the file and read the function around the line.
+2. Decide whether it runs on the path you captured and on the main thread.
+3. Drop the ones that do not, and say which you dropped and why.
+
+Then read the path files yourself with the findings in mind. The audit only
+knows the patterns it was given, and the cause is often something specific to
+the app that no pattern covers. The list of files it read is in
+`code_audit.md`, in the order they are reached from the entry points.
+
+When you explain a finding to the person, pair the two halves: what the trace
+measured, and the line in their code that most likely causes it. "79 ms of
+main-thread calls to system_server" is a measurement. "`MainActivity.kt:41`
+asks the TelephonyManager for the network country in `onCreate`" is something
+they can fix.
+
 Without `--app-repo`: take the top slice names from `13_startup_top_slices` /
 `23_jank_hot_slices` / `40_slice_hotspots`, then grep the repo for those literals. If almost nothing
 matches, that is itself the finding — **the app has no custom tracing**, and the
@@ -256,7 +320,8 @@ names; for Flutter and React Native see `references/cross-platform.md`.
 
 Start from `fix_plan.md` (the same list is `fix_plan` in `findings.json` and
 section 5 of `report.html`). Each item says what to change, where if the trace
-can tell, and which number should move. The list is ordered: the capture
+can tell, and which number should move. With `--app-repo` each item also lists
+the candidates the code audit found on the profiled path, with file and line. The list is ordered: the capture
 first, then making the app measurable, then fixes whose findings are high or
 medium. Fixes whose findings are only information in this trace are listed
 under "Can wait".
@@ -265,7 +330,9 @@ These are suggestions from one trace, not instructions. Review them before
 you act:
 
 1. Read the code each one points at. Drop any that do not apply, and tell the
-   person which you dropped and why.
+   person which you dropped and why. A candidate from the code audit is a
+   pattern match: confirm it runs on this path, and on which thread, before
+   you call it the cause.
 2. Take the first one left. One fix per change.
 3. Build before and after from the same build type, trace sections in both.
 4. Capture 10 or more runs per side and compare them with `remeasure.py`.

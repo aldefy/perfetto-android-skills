@@ -9,6 +9,7 @@ incident, not a hypothetical.
 | 1. Debug-build contamination | Guard written, **unproven on a real debuggable trace** | `run_eval.py` reports UNPROVEN until `fixtures/debug-build-after-out` exists |
 | 2. `android_startups` silent gap | Fixed | `run_eval.py` PASS on the original incident CSVs |
 | 3. Health vs coverage | Fixed | `run_eval.py` PASS on the original incident CSVs |
+| 4. No frame deadlines read as "all on time" | Fixed | `test_logic.py` and `test_visual_report.py`, on rows written to match the incident. No fixture: the incident trace is not public |
 
 Each fixture's `findings.json` and `report.md` are the frozen output from the
 day of the incident and are never regenerated. `run_eval.py` feeds the
@@ -170,6 +171,43 @@ Every value is from a closed set, and `unknown` always means the check did
 not run or could not decide. It never means pass. `verdict` is `trusted`,
 `directional_only` or `not_trustworthy`. `run_eval.py` checks each field
 against the fixture's own CSVs.
+
+## Trap 4: a phone with no frame deadlines reads as a perfectly smooth app
+
+**What happened:** a release build was captured on an Android 10 phone. The
+frame timeline, which records each frame's deadline and who missed it, exists
+from Android 12. The trace still had frames, counted from Choreographer slices,
+so the report showed several hundred frames, zero late, "100% on time", under a
+verdict of "Trusted. The capture passed every check" printed above two rows
+marked Fail. The person running it had to add a note by hand saying the frames
+section was not real.
+
+Four more wrong readings came from the same run:
+
+- A capture made with `capture.sh --start` was marked not trustworthy because
+  of `config_write_into_file_no_flush`. That stat means trace_processor has to
+  load the file in one piece. It loses nothing.
+- The start type was shown as `[NULL] start`, and the startup charts were
+  empty. The stdlib ties a launch to its process through an `activityResume`
+  slice that older Android does not write.
+- Binder calls were titled "unknown", because that Android version does not
+  name the interface.
+- The top two "hot slices" were `waitForever`: threads parked waiting for the
+  GPU, which is idle time.
+
+**The fix:** `health_status()` now carries the device (`device.sdk`) and a
+`frames` state: `measured`, `not_recorded`, `unsupported` or `unknown`. With
+`unsupported` the jank findings are not produced at all, the page says "late
+frames: not measured" and why, and `remeasure.py` leaves the frame metrics out
+of a comparison. A missing data source that does not decide the verdict is
+shown as "Missing", not "Fail", and the verdict sentence lists what the trace
+cannot answer. The start type falls back to `cold` when `bindApplication` runs
+inside the launch, and the startup queries fall back to the main thread of the
+process named after the package.
+
+**Why it matters:** this is Trap 3 again in a new place. An empty table and a
+table of zeros look the same as a good result unless something states that the
+measurement was not possible.
 
 ## What this means for now
 

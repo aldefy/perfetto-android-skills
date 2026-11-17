@@ -1,5 +1,9 @@
 -- Whole-process hotspot ranking by SELF time (own cost, excluding children).
 -- Sorting by total_ms lies: a wrapper slice inherits everything below it.
+--
+-- waitForever is left out. It is hwui's fence wait on the "GPU completion" and
+-- "HWC release" threads: a thread parked until the GPU or the display is done.
+-- It is idle time, and on some Android versions it tops this list by seconds.
 INCLUDE PERFETTO MODULE slices.with_context;
 SELECT
   s.name,
@@ -13,6 +17,7 @@ LEFT JOIN (
   FROM slice WHERE parent_id IS NOT NULL GROUP BY parent_id
 ) c ON c.parent_id = s.id
 WHERE s.process_name GLOB '__PKG__'
+  AND s.name != 'waitForever'
 GROUP BY 1, 2
 ORDER BY self_ms DESC
 LIMIT 30;

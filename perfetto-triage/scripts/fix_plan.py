@@ -30,7 +30,9 @@ import re
 import sys
 
 REVIEW = [
-    "Read the code each suggestion points at. Drop any that do not apply, and say which and why.",
+    "Read the code each suggestion points at. Drop any that do not apply, and say which and why. "
+    "A candidate from the code audit is a pattern match: confirm the line runs on this path, "
+    "and on which thread, before calling it the cause.",
     "Take the first one left. One fix per change, so the result can be attributed.",
     "Build before and after from the same build type. Trace sections go in both.",
     "Capture 10 or more runs per side and compare them: "
@@ -65,6 +67,22 @@ FIXES = {
         "change": ["Capture with capture.sh, whose config includes android.surfaceflinger.frametimeline",
                    "Without it late frames cannot be attributed to the app or the compositor"],
         "check": ["coverage: frametimeline is ok"]},
+    "frames_unsupported": {
+        "stage": "measure", "by_severity": True,
+        "title": "Measure late frames on a phone with Android 12 or newer",
+        "change": ["This phone's Android version records no frame deadlines, so no capture "
+                   "on it can say a frame was late",
+                   "Repeat the same flow on an Android 12+ phone with capture.sh --start and --stop",
+                   "Keep this phone for startup numbers: an old, slow device is a fair worst case"],
+        "check": ["coverage: frametimeline is ok"]},
+    "jit_compile": {
+        "stage": "fix", "title": "Measure a build that is compiled the way users get it",
+        "change": ["See how it is compiled: adb shell dumpsys package dexopt | grep -A2 <pkg>",
+                   "Not speed-profile: adb shell cmd package compile -f -m speed-profile <pkg>, then capture again",
+                   "If the APK carries no Baseline Profile, that command has nothing to compile. Add a profile first",
+                   "Do this to the before build and the after build alike, or the comparison is not fair"],
+        "check": ["JIT compile (ms)"] + START,
+        "where_hint": "baseline-prof.txt, or the module that generates the profile"},
     "no_sched": {
         "stage": "capture", "title": "Record again with scheduler data",
         "change": ["Capture with capture.sh, whose config includes sched and thread state",
@@ -181,8 +199,14 @@ SEV = {"blocker": 0, "high": 1, "medium": 2, "info": 3}
 
 
 def build(findings: list, health: dict | None = None, code_map: dict | None = None,
-          handoffs: list | None = None) -> dict:
-    """findings as triage.py makes them -> {"summary", "review", "items"}."""
+          handoffs: list | None = None, audit: dict | None = None) -> dict:
+    """findings as triage.py makes them -> {"summary", "review", "items"}.
+    audit: what code_audit.py found in the code on the profiled path. Its items
+    become each suggestion's candidates: places to read first, not verdicts."""
+    by_kind: dict[str, list] = {}
+    for it in (audit or {}).get("items", []):
+        for k in it.get("plan", []):
+            by_kind.setdefault(k, []).append(it)
     compose = any(h.get("skill") == "compose-expert" for h in handoffs or [])
     evidence = {s["name"]: s.get("evidence") for s in (code_map or {}).get("slices", [])
                 if s.get("evidence")}
@@ -220,9 +244,27 @@ def build(findings: list, health: dict | None = None, code_map: dict | None = No
             m = re.search(r"Main-thread binder: (.+?) costs", f.get("title", ""))
             if m:
                 item["where"] = [m.group(1)]
+            else:
+                item["change"][0] = ("The trace does not name the interface. The process that "
+                                     "was called is the lead: find the framework APIs it serves")
+        cands = []
+        for it in by_kind.get(kind, []):
+            if any(c["check"] == it["check"] and c.get("file") == it.get("file")
+                   and c.get("line") == it.get("line") for c in cands):
+                continue
+            cands.append({k: it.get(k) for k in
+                          ("check", "title", "file", "line", "code", "on_path", "why", "fix", "note")
+                          if it.get(k) is not None})
+        if cands:
+            # likely-on-main-thread first, and no more than six on a card
+            cands.sort(key=lambda c: "note" in c)
+            item["candidates"] = cands[:6]
+            if len(cands) > 6:
+                item["candidates_more"] = len(cands) - 6
         if fix["stage"] == "capture":
             item["priority"] = "first"
-        elif fix["stage"] == "measure" or SEV.get(item["finding_severity"], 3) <= 2:
+        elif (fix["stage"] == "measure" and not fix.get("by_severity")) \
+                or SEV.get(item["finding_severity"], 3) <= 2:
             item["priority"] = "next"
         else:
             item["priority"] = "later"
@@ -292,8 +334,20 @@ def to_markdown(plan: dict, heading: str = "## Suggested fixes, in order") -> st
         out.extend(f"  - {step}" for step in item["change"])
         out.append("- Where: " + (
             ", ".join(f"`{w}`" for w in item["where"]) if item["where"]
+            else "the candidates below" if item.get("candidates")
             else item["where_hint"] if item.get("where_hint")
+            else "the capture, not the code" if item["stage"] == "capture"
             else "not known from the trace. Map the slices to code first (Step 4)."))
+        if item.get("candidates"):
+            out.append("- In the code on this path (candidates: read each before acting):")
+            for c in item["candidates"]:
+                at = (f"`{c['file']}:{c['line']}`" if c.get("file") and c.get("line")
+                      else f"`{c['file']}`" if c.get("file") else "the repo")
+                code = f" `{c['code']}`" if c.get("code") else ""
+                out.append(f"  - {at}{code}. {c['title']} ({c.get('on_path', '')}). {c['fix']}"
+                           + (f" Note: {c['note']}" if c.get("note") else ""))
+            if item.get("candidates_more"):
+                out.append(f"  - and {item['candidates_more']} more in code_audit.md")
         if item["check"]:
             out.append("- Check: " + ", ".join(item["check"]))
         if item.get("skill"):
@@ -314,7 +368,8 @@ def main():
     with open(path) as fh:
         data = json.load(fh)
     plan = data.get("fix_plan") or build(data.get("findings") or [], data.get("health_status"),
-                                         data.get("code_map"), data.get("handoffs"))
+                                         data.get("code_map"), data.get("handoffs"),
+                                         data.get("code_audit"))
     print(json.dumps(plan, indent=2) if args.json else to_markdown(plan, "# Suggested fixes"))
 
 
