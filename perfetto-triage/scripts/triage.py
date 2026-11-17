@@ -28,6 +28,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 import uuid
@@ -71,6 +72,36 @@ def ensure_tp(explicit: str | None) -> str:
     return dest
 
 
+def log(msg: str) -> None:
+    """One progress line on stderr, flushed, so a caller tailing the output
+    always sees what triage is doing right now."""
+    sys.stderr.write(f"[triage] {msg}\n")
+    sys.stderr.flush()
+
+
+class Heartbeat:
+    """While a slow step runs, say so every `every` seconds. Without this a
+    long query on a large trace is indistinguishable from a hang."""
+
+    def __init__(self, label: str, every: float = 20.0):
+        self.label, self.every = label, every
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self):
+        while not self._stop.wait(self.every):
+            log(f"{self.label}: still running, {int(time.time() - self.t0)}s so far")
+
+    def __enter__(self):
+        self.t0 = time.time()
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_):
+        self._stop.set()
+        self._thread.join(timeout=1)
+
+
 class Session:
     """A warm trace_processor session: parse the trace once, query it many times."""
 
@@ -81,6 +112,17 @@ class Session:
         self.remote = True
 
     def __enter__(self):
+        try:
+            size_mb = os.path.getsize(self.trace) / 1e6
+        except OSError:
+            size_mb = 0.0
+        log(f"loading the trace into trace_processor ({size_mb:.0f} MB)")
+        with Heartbeat("loading the trace"):
+            self._start()
+        return self
+
+    def _start(self):
+        started = time.time()
         try:
             subprocess.run(
                 [self.tp, "server", "unix", "--name", self.name,
@@ -94,6 +136,7 @@ class Session:
                     capture_output=True, text=True,
                 )
                 if probe.returncode == 0 and "ok" in probe.stdout:
+                    log(f"trace loaded in {time.time() - started:.0f}s")
                     return self
                 time.sleep(1)
             raise RuntimeError("session server never became ready")
@@ -108,12 +151,26 @@ class Session:
             subprocess.run([self.tp, "server", "kill", self.name],
                            capture_output=True)
 
-    def query_file(self, path: str) -> tuple[list[str], list[list[str]], str]:
+    def restart(self):
+        """Throw the server away and load the trace again. A timed-out query
+        keeps running inside the old server, and every later query would
+        queue behind it."""
+        self.__exit__()
+        self.name = f"triage-{uuid.uuid4().hex[:8]}"
+        self.remote = True
+        log("restarting trace_processor after a timeout")
+        with Heartbeat("loading the trace"):
+            self._start()
+
+    def query_file(self, path: str, timeout: float = 600) -> tuple[list[str], list[list[str]], str]:
         target = ["--remote", self.name] if self.remote else [self.trace]
-        proc = subprocess.run(
-            [self.tp, "query", *target, "-f", path],
-            capture_output=True, text=True, timeout=600,
-        )
+        try:
+            proc = subprocess.run(
+                [self.tp, "query", *target, "-f", path],
+                capture_output=True, text=True, timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return [], [], f"timed out after {timeout:g}s"
         stdout, stderr = proc.stdout, proc.stderr
         if proc.returncode != 0:
             return [], [], (stderr or stdout).strip()
@@ -642,6 +699,26 @@ def analyse(results: dict, pkg: str, mode: str = "unknown",
     return f
 
 
+def unfinished_findings(errors: dict) -> list[dict]:
+    """A query that failed or timed out leaves an empty section, and an empty
+    section reads as 'nothing wrong'. Say plainly that it was never answered."""
+    out = []
+    for stem, err in sorted(errors.items()):
+        timed_out = err.startswith("timed out")
+        out.append({
+            "severity": "blocker", "area": "trace",
+            "title": f"Query {stem} did not finish",
+            "detail": (f"It {err}. " if timed_out else
+                       f"It failed: {err.splitlines()[-1][:200]}. ")
+                      + "Its section of this report is empty because the question was "
+                        "never answered, not because nothing was found.",
+            "action": ("Run triage again with a larger --query-timeout, or capture a "
+                       "shorter window." if timed_out else
+                       "Run the query by hand with trace_processor to see the full error."),
+            "source": [stem], "directional_only": False})
+    return out
+
+
 def trust_table(hs: dict) -> list[str]:
     """The 'Trust check' block at the top of report.md."""
     mark = {"pass": "PASS", "ok": "PASS", "release": "PASS", "trusted": "PASS",
@@ -723,6 +800,9 @@ def main():
     ap.add_argument("--app-repo", default=None,
                     help="the app's source tree. report.html takes its colours from the "
                          "app's own theme tokens when it can find them.")
+    ap.add_argument("--query-timeout", type=float, default=600,
+                    help="seconds one query may run before it is abandoned and "
+                         "reported as not finished (default 600)")
     ap.add_argument("--no-html", action="store_true",
                     help="skip report.html (the visual report)")
     args = ap.parse_args()
@@ -742,16 +822,24 @@ def main():
         stems = [s for s in stems if any(s.startswith(w) for w in wanted)]
 
     results, errors = {}, {}
+    started = time.time()
+    log(f"{len(stems)} queries to run. Phases: load, query, report.")
     with Session(tp, args.trace) as sess:
-        for stem in stems:
+        for i, stem in enumerate(stems, 1):
+            tag = f"[{i}/{len(stems)}] {stem}"
             src = os.path.join(QUERY_DIR, stem + ".sql")
             sql = open(src).read().replace("__PKG__", args.pkg)
             run_path = os.path.join(tmpdir, stem + ".sql")
             open(run_path, "w").write(sql)
-            header, rows, err = sess.query_file(run_path)
+            t0 = time.time()
+            with Heartbeat(tag):
+                header, rows, err = sess.query_file(run_path, args.query_timeout)
+            took = time.time() - t0
             if err:
                 errors[stem] = err
-                sys.stderr.write(f"[triage] {stem}: {err.splitlines()[-1][:160]}\n")
+                log(f"{tag}: FAILED after {took:.1f}s: {err.splitlines()[-1][:160]}")
+                if err.startswith("timed out") and sess.remote:
+                    sess.restart()
                 continue
             results[stem] = (header, rows)
             with open(os.path.join(args.out, "csv", stem + ".csv"), "w", newline="") as fh:
@@ -759,10 +847,12 @@ def main():
                 if header:
                     w.writerow(header)
                     w.writerows(rows)
-            sys.stderr.write(f"[triage] {stem}: {len(rows)} rows\n")
+            log(f"{tag}: {len(rows)} rows in {took:.1f}s")
 
+    log("queries done, working out the findings")
     status = health_status(results, args.pkg, mode)
     findings = analyse(results, args.pkg, mode, status)
+    findings = unfinished_findings(errors) + findings
 
     # ---- report.md
     icon = {"blocker": "🛑", "high": "🔴", "medium": "🟠", "info": "🔵"}
@@ -824,6 +914,7 @@ def main():
             out.append("")
 
     report = os.path.join(args.out, "report.md")
+    log("writing report.md and findings.json")
     open(report, "w").write("\n".join(out))
     with open(os.path.join(args.out, "findings.json"), "w") as fh:
         json.dump({"trace": args.trace, "pkg": args.pkg, "mode": mode,
@@ -831,6 +922,7 @@ def main():
 
     visual = None
     if not args.no_html:
+        log("writing report.html")
         try:  # the visual report is a convenience and must never fail a triage
             import importlib.util
             spec = importlib.util.spec_from_file_location(
@@ -839,7 +931,8 @@ def main():
             spec.loader.exec_module(vr)
             visual = vr.write(args.out, app_repo=args.app_repo)
         except Exception as exc:
-            sys.stderr.write(f"[triage] visual report skipped: {exc}\n")
+            log(f"visual report skipped: {exc}")
+    log(f"done in {time.time() - started:.0f}s")
 
     print(f"\nTrust: {status['verdict']}"
           + (f" ({'; '.join(status['reasons'])})" if status["reasons"] else ""))

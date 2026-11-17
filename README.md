@@ -66,6 +66,8 @@ perfetto-triage/scripts/capture.sh com.example.app --stop           # start, run
 # 2. triage — parses once, runs all 20 queries, writes a ranked report
 python3 perfetto-triage/scripts/triage.py trace.pftrace --pkg com.example.app --out triage-out
 
+#    it prints its progress as it goes: load, [n/20] per query, then the report files
+
 # 3. open triage-out/report.html, or read triage-out/report.md
 #    Trust check first, then findings worst-first
 ```
