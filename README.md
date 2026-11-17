@@ -20,6 +20,7 @@ perfetto-triage/
   scripts/
     capture.sh                 pulls a real trace off a connected device (cold-start or interactive)
     triage.py                  parses a trace once, runs the query pack, writes a ranked report
+    visual_report.py           turns that output into one self-contained report.html with charts
     remeasure.py                diffs two triage-out directories: findings, jank numbers, self-time hotspots
     ab_startup.sh               adb-only before/after harness when a benchmark module is out of scope
   queries/                    20 PerfettoSQL files, 00_health.sql through 41_anrs.sql
@@ -65,8 +66,32 @@ perfetto-triage/scripts/capture.sh com.example.app --stop           # start, run
 # 2. triage — parses once, runs all 20 queries, writes a ranked report
 python3 perfetto-triage/scripts/triage.py trace.pftrace --pkg com.example.app --out triage-out
 
-# 3. read triage-out/report.md — Trust check first, then findings worst-first
+# 3. open triage-out/report.html, or read triage-out/report.md
+#    Trust check first, then findings worst-first
 ```
+
+## The visual report
+
+`triage.py` also writes `triage-out/report.html`: the four questions, each
+answered with a chart and a plain explanation of what the chart means and
+where to find the same thing in ui.perfetto.dev. It is one file with no
+scripts and no network requests, so it can be opened, attached or published
+as is.
+
+```bash
+python3 perfetto-triage/scripts/triage.py trace.pftrace --pkg com.example.app \
+    --app-repo ~/code/app          # theme the page from the app's own colours
+python3 perfetto-triage/scripts/visual_report.py triage-out --app-repo ~/code/app   # re-render only
+python3 perfetto-triage/scripts/visual_report.py --print-theme --app-repo ~/code/app
+```
+
+Thread states and frames keep the Perfetto UI's colours, so a strip on the
+page and the track in the trace viewer read the same way. Everything else
+takes the app's theme when `--app-repo` finds one: a Compose colour scheme,
+`res/values/colors.xml`, `Shapes`, bundled fonts. An app with no declared
+tokens gets a guess from the colours its UI code uses most, and the footer
+says it is a guess. Tokens that would make text unreadable are skipped.
+`--no-html` turns the page off.
 
 `capture.sh` refuses a debuggable build (exit 3). Pass `--allow-debug` to
 capture one anyway; the report will flag it. Use `--start` and `--stop`

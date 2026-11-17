@@ -6,6 +6,7 @@ fixture captures from real incidents instead of synthetic mocks.
 ```bash
 python3 run_eval.py                      # real fixtures, current triage.py
 python3 test_logic.py                    # synthetic rows, decision table only
+python3 test_visual_report.py            # report.html: theme discovery, rendering, escaping
 python3 synthetic_build_type_check.py    # synthetic trace through trace_processor
 ```
 

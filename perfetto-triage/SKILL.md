@@ -125,6 +125,30 @@ pack in `queries/`, and writes:
 - `triage-out/report.md` — Trust check, findings worst-first, then the evidence tables
 - `triage-out/findings.json` — a `health_status` block plus the same findings, machine-readable
 - `triage-out/csv/*.csv` — every raw result
+- `triage-out/report.html` — the same findings as a page for a person
+
+`report.html` is what you show the person. It asks the four questions in
+order and answers each with a chart drawn from the query results: the main
+thread's states, the late frames measured from their deadline, the startup
+breakdown, the self-time ranking. Under each chart it says what the chart
+shows, what that means, and where to find the same thing in ui.perfetto.dev.
+
+```bash
+python3 scripts/triage.py trace.pftrace --pkg com.example.app --app-repo /path/to/app
+```
+
+Thread states and frames are drawn in the Perfetto UI's colours, so the page
+and the trace viewer read the same way. Those never change. With `--app-repo`
+the rest of the page (background, text, accent, ranked bars, corner radius,
+font) comes from the app's own theme: a Compose colour scheme,
+`res/values/colors.xml`, `Shapes`, bundled font files. If the app declares no
+tokens, the page guesses from the colours its UI code uses most and says so in
+the footer. A token that would make text unreadable is not used.
+
+When your environment can display HTML (an artifact, a preview pane, a
+browser), show `report.html` instead of describing it. It is one file with no
+scripts and no network requests. Read `report.md` and `findings.json`
+yourself; they hold the full tables.
 
 Read the **Trust check** at the top of `report.md` before anything else. It is
 question 1, answered explicitly, and mirrored in `findings.json`:
@@ -235,6 +259,12 @@ Write findings as: **observation → evidence → cause → fix → expected eff
 > should return roughly 145 ms.
 
 Never report a number without the device, the build type, and the run count.
+
+`report.html` covers the observation and the evidence. Add what it cannot
+know: which hot slice names are the app's own code (Step 4), the cause you
+infer, and the fix. On a `directional_only` report the page still draws the
+numbers so the shape is visible. Its banner says not to quote them, and
+neither should you.
 
 Keep measured and inferred apart. Every finding carries a `source`: the query
 stems its numbers came from, re-checkable in `csv/<stem>.csv`. That part is

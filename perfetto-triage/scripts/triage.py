@@ -11,6 +11,8 @@ Outputs into --out (default ./triage-out):
   report.md      human-readable report, one section per question
   findings.json  machine-readable verdicts plus a health_status block, for an
                  agent to act on
+  report.html    the same findings as a page for a person: charts in the
+                 Perfetto UI's colours, each with a plain explanation
   csv/*.csv      raw result of every query
 
 No third-party dependencies. Downloads trace_processor on first run.
@@ -718,6 +720,11 @@ def main():
                          "a capture.sh filename (<pkg>-startup-*.pftrace). In startup "
                          "mode a trace with no app launch is reported as a failed "
                          "capture instead of silently having no startup findings.")
+    ap.add_argument("--app-repo", default=None,
+                    help="the app's source tree. report.html takes its colours from the "
+                         "app's own theme tokens when it can find them.")
+    ap.add_argument("--no-html", action="store_true",
+                    help="skip report.html (the visual report)")
     args = ap.parse_args()
     mode = infer_mode(args.trace) if args.mode == "auto" else args.mode
 
@@ -822,9 +829,23 @@ def main():
         json.dump({"trace": args.trace, "pkg": args.pkg, "mode": mode,
                    "health_status": status, "findings": findings}, fh, indent=2)
 
+    visual = None
+    if not args.no_html:
+        try:  # the visual report is a convenience and must never fail a triage
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                "visual_report", os.path.join(HERE, "visual_report.py"))
+            vr = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(vr)
+            visual = vr.write(args.out, app_repo=args.app_repo)
+        except Exception as exc:
+            sys.stderr.write(f"[triage] visual report skipped: {exc}\n")
+
     print(f"\nTrust: {status['verdict']}"
           + (f" ({'; '.join(status['reasons'])})" if status["reasons"] else ""))
     print(f"{len(findings)} finding(s). Report: {report}")
+    if visual:
+        print(f"Visual report: {visual}")
     for f in findings[:8]:
         print(f"  {icon.get(f['severity'], '')} [{f['area']}] {f['title']}")
 
