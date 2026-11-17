@@ -81,12 +81,15 @@ def matches(name: str, pattern: str) -> bool:
 
 
 def pick_process(rows: list[dict], key: str, pkg: str) -> str | None:
-    """The process the report is about: the package filter if it matches a row,
-    otherwise the first row (the queries already sort the busiest first)."""
+    """The process the report is about: the row the package filter matches.
+    Only with no package named does it fall back to the first row (the queries
+    sort the busiest first). A named package that matches nothing gets None:
+    another app's numbers must never be shown as this app's."""
+    named = bool(pkg) and pkg != "*"
     for r in rows:
-        if pkg and pkg != "*" and matches(r.get(key, ""), pkg):
+        if named and matches(r.get(key, ""), pkg):
             return r.get(key)
-    return rows[0].get(key) if rows else None
+    return rows[0].get(key) if rows and not named else None
 
 
 # --------------------------------------------------------------------------
@@ -633,6 +636,28 @@ VERDICT = {
 }
 
 
+# What a missing data source means for the reader, in their words.
+GAP_MEANS = {
+    "frametimeline": "which frames were late",
+    "blocked_reasons": "why a thread was blocked in the kernel",
+    "binder": "which calls to other processes were slow",
+    "sched": "whether a thread was running or waiting",
+    "slices": "what the app was doing",
+}
+
+
+def gaps_text(hs: dict) -> str:
+    """'which frames were late (this phone runs Android 10, ...); why a thread ...'"""
+    out = []
+    for gap in hs.get("coverage_gaps") or []:
+        text = GAP_MEANS.get(gap, gap.replace("_", " "))
+        if gap == "frametimeline" and hs.get("frames") == "unsupported":
+            rel = (hs.get("device") or {}).get("android") or "an old version"
+            text += f" (this phone runs Android {rel}, and frame deadlines are recorded from Android 12)"
+        out.append(text)
+    return "; ".join(out)
+
+
 def section_of(f: dict) -> str:
     src = f.get("source") or []
     if f.get("area") == "trace":
@@ -674,28 +699,49 @@ def q1_trust(hs: dict | None) -> str:
                 'older triage.py. Run triage again before relying on any number here.</p>')
     key = hs.get("verdict", "directional_only")
     name, text = VERDICT.get(key, VERDICT["directional_only"])
-    rows = [("Trace health", hs.get("trace_health", "unknown"), "no errors and no dropped data")]
+    gap_list = gaps_text(hs)
+    if key == "trusted" and gap_list:
+        text = ("The numbers it has can be quoted with the device, build type and run count. "
+                "It cannot answer: " + gap_list + ".")
+    health = hs.get("trace_health", "unknown")
+    rows = [("Trace health", health,
+             "no errors and no dropped data" if health == "pass"
+             else "trace_processor reported errors or dropped data" if health == "fail"
+             else "the health check did not run")]
+    unsupported = hs.get("frames") == "unsupported"
     for k, v in (hs.get("coverage") or {}).items():
-        rows.append((f"Recorded: {k.replace('_', ' ')}", v, "this data source is in the trace"))
+        if v == "ok":
+            note = "this data source is in the trace"
+        elif v == "missing" and k == "frametimeline" and unsupported:
+            note = "this phone's Android version does not record it"
+        elif v == "missing":
+            note = "not in the trace, so it cannot answer " + GAP_MEANS.get(k, k)
+        else:
+            note = "the coverage check did not run"
+        rows.append((f"Recorded: {k.replace('_', ' ')}", v, note))
     rows.append(("Build type", hs.get("build_type", "unknown"),
                  hs.get("build_type_detail") or "read from the trace"))
     rows.append(("Startup capture", hs.get("startup_capture", "unknown"),
                  f"capture mode: {hs.get('mode', 'unknown')}"))
     good = {"pass", "ok", "release"}
-    bad = {"fail", "missing", "debuggable", "missed"}
+    bad = {"fail", "debuggable", "missed"}
+    # A missing data source fails the verdict only when it is a core one.
+    core = {"Recorded: sched", "Recorded: slices"}
     cells = []
     for label, value, note in rows:
-        cls = "good" if value in good else "bad" if value in bad else "na" if value == "not_expected" else "unk"
-        word = {"good": "Pass", "bad": "Fail", "na": "n/a", "unk": "Unknown"}[cls]
+        if value == "missing":
+            cls = "bad" if label in core else "gap"
+        else:
+            cls = "good" if value in good else "bad" if value in bad else "na" if value == "not_expected" else "unk"
+        word = {"good": "Pass", "bad": "Fail", "na": "n/a", "unk": "Unknown", "gap": "Missing"}[cls]
         cells.append(f'<tr><th scope="row">{esc(label)}</th><td><span class="chip st-{cls}">{word}'
                      f'</span></td><td><code>{esc(str(value))}</code></td><td>{esc(note)}</td></tr>')
     reasons = ""
     if hs.get("reasons"):
         reasons = "<ul class='reasons'>" + "".join(f"<li>{esc(r)}</li>" for r in hs["reasons"]) + "</ul>"
     gaps = ""
-    if hs.get("coverage_gaps"):
-        gaps = ('<p class="how">Not answerable from this trace: '
-                + esc(", ".join(hs["coverage_gaps"])) + ".</p>")
+    if gap_list and key != "trusted":
+        gaps = '<p class="how">This trace cannot answer: ' + esc(gap_list) + ".</p>"
     return (f'<div class="verdict v-{esc(key)}"><span class="chip v-{esc(key)}">{esc(name)}</span>'
             f'<p>{esc(text)}</p></div>{reasons}{gaps}'
             f'<table class="checks"><tbody>{"".join(cells)}</tbody></table>')
@@ -778,11 +824,33 @@ def q3_frames(out_dir: str, pkg: str, hs: dict | None) -> str:
     proc = pick_process(summary, "process_name", pkg)
     row = next((r for r in summary if r.get("process_name") == proc), None)
     if not row:
+        if hs and hs.get("frames") == "unsupported":
+            rel = (hs.get("device") or {}).get("android") or "this version"
+            return (f'<p class="empty">This phone runs Android {esc(rel)}. Frame deadlines are '
+                    f'recorded from Android 12, so late frames cannot be measured on it.</p>')
         if hs and (hs.get("coverage") or {}).get("frametimeline") == "missing":
             return ('<p class="empty">This trace has no FrameTimeline data, so missed frames '
                     'cannot be attributed. Record again with the frametimeline data source.</p>')
         return '<p class="empty">No frames were recorded for this process.</p>'
     frames, janky = num(row.get("frames")) or 0, num(row.get("janky")) or 0
+    if hs and hs.get("frames") in ("unsupported", "not_recorded"):
+        # Frames were counted from Choreographer slices, but nothing recorded a
+        # deadline for them. "0 late" would be a claim this trace cannot make.
+        if hs.get("frames") == "unsupported":
+            rel = (hs.get("device") or {}).get("android") or "this version"
+            why = (f"This phone runs Android {rel}. Frame deadlines are recorded from "
+                   f"Android 12, so no capture on this phone can say a frame was late. "
+                   f"Use an Android 12 or newer phone to measure jank.")
+            sub = f"Android {rel} records no deadlines"
+        else:
+            why = ("The trace has no frame timeline, so there is no deadline to compare "
+                   "each frame against. Record again with capture.sh, whose config turns "
+                   "the frame timeline on.")
+            sub = "no frame timeline in this trace"
+        return (tiles([("frames drawn", f"{frames:.0f}", proc or ""),
+                       ("late frames", "not measured", sub)])
+                + f'<p class="empty">{esc(why)} The frame count above is not a result: '
+                  f'it does not mean the frames were on time.</p>')
     app, sf = num(row.get("app_jank")) or 0, num(row.get("sf_jank")) or 0
     other = max(0.0, janky - app - sf)
     worst = num(row.get("worst_overrun_ms"))
@@ -900,7 +968,9 @@ def q4_time(out_dir: str, pkg: str, hs: dict | None, cm: dict | None = None) -> 
         classes = num(cls[0].get("classes_loaded")) if cls else None
         parts.append("<h3 class='sub'>Startup</h3>")
         parts.append(tiles([
-            ("time to first frame (TTID)", ms(ttid), f"{s.get('startup_type', '')} start"),
+            ("time to first frame (TTID)", ms(ttid),
+             f"{s.get('startup_type')} start" if s.get("startup_type") not in (None, "", NULL)
+             else "start type not recorded"),
             ("time to full content (TTFD)", ms(ttfd) if ttfd else "not reported",
              "" if ttfd else "the app never calls reportFullyDrawn()"),
             ("classes loaded", f"{classes:,.0f}" if classes else "",
@@ -961,10 +1031,16 @@ def q4_time(out_dir: str, pkg: str, hs: dict | None, cm: dict | None = None) -> 
     why = read_csv(out_dir, "31_binder_why_slow")
     if binder or why:
         parts.append("<h3 class='sub'>Binder calls on the main thread</h3>")
-        rows = [(r.get("aidl_name", ""), num(r.get("total_ms")),
+        unnamed = [r for r in binder if r.get("aidl_name") in (None, "", NULL, "unknown")]
+        rows = [(f"to {r.get('server_process', '')}", num(r.get("total_ms")), f"{r.get('n', '')}x")
+                if r in unnamed else
+                (r.get("aidl_name", ""), num(r.get("total_ms")),
                  f"{r.get('n', '')}x to {r.get('server_process', '')}") for r in binder]
-        parts.append(figure("Synchronous calls to other processes",
-                            "Each bar is one binder interface the main thread called and waited on.",
+        how = "Each bar is one binder interface the main thread called and waited on."
+        if unnamed:
+            how += (" This trace does not name the interfaces, so those calls are grouped "
+                    "by the process that was called.")
+        parts.append(figure("Synchronous calls to other processes", how,
                             bar_chart(rows, "Main thread binder calls")))
         agg: dict[str, float] = {}
         for r in why:
@@ -988,14 +1064,50 @@ def q4_time(out_dir: str, pkg: str, hs: dict | None, cm: dict | None = None) -> 
     return body or '<p class="empty">No startup, slice or binder data for this process.</p>'
 
 
-def fix_section(plan: dict | None) -> str:
+def _candidate(c: dict) -> str:
+    at = (f"{c['file']}:{c['line']}" if c.get("file") and c.get("line")
+          else c.get("file") or "the repo")
+    code = f'<code class="src-line">{esc(c["code"])}</code>' if c.get("code") else ""
+    note = f' <i>{esc(c["note"])}</i>' if c.get("note") else ""
+    return (f'<li><code>{esc(at)}</code>{code}<span>{esc(c.get("title", ""))} '
+            f'({esc(c.get("on_path", ""))}). {esc(c.get("fix", ""))}{note}</span></li>')
+
+
+def audit_intro(audit: dict | None) -> str:
+    """Which code was read, and how it was chosen."""
+    if not audit:
+        return ""
+    files = (audit.get("path") or {}).get("files") or []
+    how = "".join(f"<li>{esc(h)}</li>" for h in (audit.get("path") or {}).get("how") or [])
+    listed = "".join(f'<li><code>{esc(f["file"])}</code> <span>{esc(f["role"])}</span></li>'
+                     for f in files[:14])
+    more = (f'<p class="src">and {len(files) - 14} more, in code_audit.md</p>'
+            if len(files) > 14 else "")
+    return (f'<div class="audit"><p><span class="tag">code audit</span> {esc(audit.get("summary", ""))}</p>'
+            f'<details><summary>Which code was read, and why</summary><ul class="steps">{how}</ul>'
+            f'<ul class="evidence">{listed}</ul>{more}'
+            f'<p class="src">{esc(audit.get("limits", ""))}</p></details></div>')
+
+
+def audit_rest(audit: dict | None) -> str:
+    """Audit items that no finding in this trace points at."""
+    rest = [it for it in (audit or {}).get("items", []) if not it.get("because")]
+    if not rest:
+        return ""
+    return ("<h3 class='sub'>Also on this path</h3>"
+            '<p class="how">No finding in this trace points at these. They are listed because '
+            'they sit on the path that was captured.</p>'
+            f'<ul class="evidence cands">{"".join(_candidate(it) for it in rest[:10])}</ul>')
+
+
+def fix_section(plan: dict | None, audit: dict | None = None) -> str:
     """Suggested fixes, in the order to review them."""
     if not plan:
         return ""
-    out = [f'<p class="lead">{esc(plan.get("summary", ""))}</p>']
+    out = [f'<p class="lead">{esc(plan.get("summary", ""))}</p>', audit_intro(audit)]
     items = plan.get("items") or []
     if not items:
-        return "".join(out)
+        return "".join(out) + audit_rest(audit)
     out.append('<details class="review"><summary>Before acting on any of these</summary><ol>'
                + "".join(f"<li>{esc(step)}</li>" for step in plan.get("review", []))
                + "</ol></details>")
@@ -1006,8 +1118,10 @@ def fix_section(plan: dict | None) -> str:
             current = item.get("priority")
             out.append(f"<h3 class='sub'>{esc(labels.get(current, ''))}</h3>")
         where = (", ".join(f"<code>{esc(w)}</code>" for w in item.get("where") or [])
-                 or esc(item.get("where_hint") or
-                        "not known from the trace. Map the slices to code first."))
+                 or esc("the candidates below" if item.get("candidates")
+                        else item.get("where_hint")
+                        or ("the capture, not the code" if item.get("stage") == "capture"
+                            else "not known from the trace. Map the slices to code first.")))
         also = "".join(f'<p class="src">Also: {esc(x)}</p>' for x in item.get("also_because") or [])
         skill = (f'<span class="tag">skill: {esc(item["skill"])}</span>' if item.get("skill") else "")
         wait = (f'<p class="src">{esc(item["why_later"])}</p>' if item.get("why_later") else "")
@@ -1015,14 +1129,22 @@ def fix_section(plan: dict | None) -> str:
                 if item.get("blocked_by_capture") else "")
         check = (f'<p><b>Check.</b> {esc(", ".join(item.get("check") or []))}</p>'
                  if item.get("check") else "")
+        cands = ""
+        if item.get("candidates"):
+            extra = (f'<p class="src">and {item["candidates_more"]} more, in code_audit.md</p>'
+                     if item.get("candidates_more") else "")
+            cands = ('<p><b>In the code on this path.</b> <span class="src">Candidates from a '
+                     'pattern match. Read each before acting.</span></p>'
+                     f'<ul class="evidence cands">{"".join(_candidate(c) for c in item["candidates"])}'
+                     f'</ul>{extra}')
         out.append(
             f'<article class="finding fix p-{esc(str(current))}"><header>'
             f'<span class="qn">{esc(str(item.get("n", "")))}</span>{skill}'
             f'<h4>{esc(item.get("title", ""))}</h4></header>'
             f'<p class="src">Because: {esc(item.get("because", ""))}</p>{also}{wait}{hold}'
             f'<ul class="steps">{"".join(f"<li>{esc(c)}</li>" for c in item.get("change") or [])}</ul>'
-            f'<p><b>Where.</b> {where}</p>{check}</article>')
-    return "".join(out)
+            f'<p><b>Where.</b> {where}</p>{cands}{check}</article>')
+    return "".join(out) + audit_rest(audit)
 
 
 # --------------------------------------------------------------------------
@@ -1039,6 +1161,7 @@ h3{font-size:16px;margin:0 0 2px}
 h3.sub{font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin:26px 0 10px}
 h4{font-size:16px;margin:0;display:inline}
 p{margin:0 0 10px}
+h1,h2,h3,h4,p,li,td,th,figcaption{overflow-wrap:anywhere}
 code{font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--track);padding:1px 5px;border-radius:4px;overflow-wrap:anywhere}
 .meta{color:var(--muted);font-size:14px;margin-bottom:22px;overflow-wrap:anywhere}
 section{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:22px;margin:0 0 18px}
@@ -1075,6 +1198,13 @@ figcaption .how,.how{color:var(--muted);font-size:14px;margin:0 0 10px}
 .own{display:inline-block;font:700 11px/1.5 var(--font);letter-spacing:.02em;background:var(--accent);color:var(--on-accent);border-radius:999px;padding:0 7px;margin-right:6px;vertical-align:1px;white-space:nowrap}
 .evidence{list-style:none;margin:10px 0 0;padding:0;display:grid;gap:6px;font-size:13px;color:var(--muted)}
 .evidence li{overflow-wrap:anywhere}
+.cands{margin:6px 0 12px;gap:10px}
+.cands li{border-left:3px solid var(--border);padding-left:10px}
+.cands li>code:first-child{font-weight:600;color:var(--text)}
+.cands .src-line{display:block;margin:3px 0;white-space:pre-wrap}
+.cands span{display:block;color:var(--muted)}
+.audit{border:1px solid var(--border);border-radius:calc(var(--radius) * .6);padding:12px 14px;margin:0 0 14px}
+.audit p{margin:0 0 6px}
 .means .tag{margin-right:6px}
 .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin:0 0 4px}
 .tile{border:1px solid var(--border);border-radius:calc(var(--radius) * .6);padding:12px 14px}
@@ -1084,7 +1214,7 @@ figcaption .how,.how{color:var(--muted);font-size:14px;margin:0 0 10px}
 .chip{display:inline-block;font-size:12px;font-weight:700;letter-spacing:.03em;padding:2px 9px;border-radius:999px;color:#fff;margin-right:8px;vertical-align:middle}
 .chip.sev-blocker{background:#8e1b1b}.chip.sev-high{background:#b93221}.chip.sev-medium{background:#a85a00}.chip.sev-info{background:#2b6cb0}
 .chip.v-trusted,.chip.st-good{background:#1e7d32}.chip.v-directional_only{background:#a85a00}.chip.v-not_trustworthy,.chip.st-bad{background:#b93221}
-.chip.st-unk{background:#6b7280}.chip.st-na{background:#6b7280}
+.chip.st-unk{background:#6b7280}.chip.st-na{background:#6b7280}.chip.st-gap{background:#a85a00}
 .chip,.tag{white-space:nowrap}
 .tag{font-size:12px;color:var(--muted);border:1px solid var(--border);border-radius:999px;padding:1px 8px;margin-right:8px;vertical-align:middle}
 .verdict{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:0 0 10px}
@@ -1180,7 +1310,7 @@ def render(out_dir: str, theme: dict | None = None, code_map: dict | None = None
         section(4, "q4", "Where did the time go?",
                 "Only now is it worth ranking slices.", q4_time(out_dir, pkg, hs, cm)),
     ]
-    fixes = fix_section(data.get("fix_plan"))
+    fixes = fix_section(data.get("fix_plan"), data.get("code_audit"))
     if fixes:
         body.append('<section id="fixes"><h2><span class="qn">5</span>What to fix, in order</h2>'
                     '<p class="how">Suggestions drawn from this one trace, for a person or an '

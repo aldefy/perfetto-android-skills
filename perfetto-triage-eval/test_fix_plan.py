@@ -169,6 +169,24 @@ def test_status_without_html_only_writes_the_one_line():
     assert not os.path.exists(os.path.join(out, "report.html"))
 
 
+def test_old_phone_frame_gap_follows_its_severity():
+    """On a cold-start capture the gap is information, so it must not jump the
+    queue the way other measuring steps do. On a jank capture it is next."""
+    info = fp.build([finding("frames_unsupported", "info")], {"verdict": "trusted"})
+    assert kinds(info, "later") == ["frames_unsupported"], info["items"]
+    assert "Nothing in this trace needs fixing now" in info["summary"]
+    medium = fp.build([finding("frames_unsupported", "medium")], {"verdict": "trusted"})
+    assert kinds(medium, "next") == ["frames_unsupported"]
+    assert "Android 12" in medium["items"][0]["title"]
+
+
+def test_heavy_jit_suggests_compiling_the_build_before_measuring():
+    plan = fp.build([finding("jit_compile")], {"verdict": "trusted"})
+    item = plan["items"][0]
+    assert item["priority"] == "next" and "JIT compile (ms)" in item["check"]
+    assert any("speed-profile" in c for c in item["change"])
+
+
 CASES = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
 
 

@@ -214,6 +214,50 @@ def test_readings_a_real_run_showed_were_wrong():
     assert "under 1% of frames, which is a low rate" in page
 
 
+def test_old_phone_report_does_not_claim_frames_were_on_time():
+    """A real run on an Android 10 phone: no frame deadlines exist there, and
+    the page said 528 frames, 0 missed, 100% on time under a Trusted verdict
+    that 'passed every check' beside two Fail rows."""
+    out = tempfile.mkdtemp(prefix="vr-old-")
+    os.makedirs(os.path.join(out, "csv"))
+    pkg = "com.example.app"
+
+    def write(stem, text):
+        with open(os.path.join(out, "csv", stem + ".csv"), "w") as fh:
+            fh.write(text)
+    write("20_jank_summary",
+          "process_name,frames,janky,janky_pct,big_jank,huge_jank,worst_overrun_ms,app_jank,sf_jank\n"
+          f"{pkg},528,0,0,0,0,[NULL],0,0\n")
+    write("10_startup_summary", "startup_id,package,startup_type,startup_ms,ttid_ms,ttfd_ms\n"
+                                f"0,{pkg},[NULL],690,681,[NULL]\n")
+    write("30_binder_main_thread", "client_process,aidl_name,server_process,n,total_ms,max_ms\n"
+                                   f"{pkg},unknown,system_server,318,79,5.6\n")
+    hs = {"mode": "startup", "trace_health": "pass", "verdict": "trusted", "reasons": [],
+          "coverage": {"slices": "ok", "sched": "ok", "frametimeline": "missing",
+                       "blocked_reasons": "missing", "binder": "ok"},
+          "coverage_gaps": ["frametimeline", "blocked_reasons"], "build_type": "release",
+          "startup_capture": "ok", "frames": "unsupported", "device": {"sdk": 29, "android": "10"}}
+    json.dump({"trace": "t.pftrace", "pkg": pkg, "findings": [], "health_status": hs},
+              open(os.path.join(out, "findings.json"), "w"))
+    page = vr.render(out)
+    well_formed(page)
+    assert "passed every check" not in page
+    assert "It cannot answer: which frames were late (this phone runs Android 10" in page
+    assert ">Fail<" not in page, "a gap that does not decide the verdict is not a failed check"
+    assert ">Missing<" in page and "Android version does not record it" in page
+    assert "not measured" in page and "it does not mean the frames were on time" in page
+    assert "Every recorded frame met its deadline" not in page and "On time" not in page
+    assert "[NULL] start" not in page and "start type not recorded" in page
+    assert "to system_server" in page and ">unknown<" not in page
+
+
+def test_a_named_package_never_shows_another_apps_rows():
+    rows = [{"process_name": "com.other.launcher", "frames": "60"}]
+    assert vr.pick_process(rows, "process_name", "com.example.app") is None
+    assert vr.pick_process(rows, "process_name", "*") == "com.other.launcher"
+    assert vr.pick_process(rows, "process_name", "com.other.*") == "com.other.launcher"
+
+
 # ---- safety ----------------------------------------------------------------
 
 def test_trace_strings_are_escaped():

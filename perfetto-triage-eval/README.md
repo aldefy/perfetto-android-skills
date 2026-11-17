@@ -10,6 +10,8 @@ python3 test_visual_report.py            # report.html: theme discovery, renderi
 python3 test_code_map.py                 # whose code is a hot slice: positives need evidence
 python3 test_remeasure.py                # many runs per side: medians, spread, noise verdict
 python3 test_fix_plan.py                 # suggested fixes: order, restraint, and the live status files
+python3 test_code_audit.py               # code on the profiled path: what is read, what is flagged, what is left alone
+python3 test_capture.py                  # capture.sh against a stand-in adb: the config each Android version gets
 python3 synthetic_build_type_check.py    # synthetic trace through trace_processor
 ```
 

@@ -280,6 +280,107 @@ def compose_work_is_handed_to_the_compose_skill_only_when_it_is_big_enough():
     assert triage.related_skills(hot([["traversal", "40", "900", "60"]])) == ([], [])
 
 
+# ---- phones older than Android 12, where no frame deadline is recorded ------
+
+OLD_COV_H = COV_H + ["android_sdk", "build_fingerprint"]
+
+
+def old_phone(sdk="29", fingerprint="", ft="0"):
+    return base(cov=None) | {"01_coverage": (OLD_COV_H, [
+        ["1000", "500", ft, "40", "30", "800", "12000", sdk, fingerprint]])}
+
+
+@case
+def old_phone_startup_capture_is_trusted_and_says_frames_cannot_be_measured():
+    hs, f = run(old_phone())
+    assert hs["frames"] == "unsupported" and hs["device"] == {"sdk": 29, "android": "10"}, hs
+    assert hs["verdict"] == "trusted", hs
+    gap = [x for x in f if x["kind"] == "frames_unsupported"]
+    assert gap and gap[0]["severity"] == "info" and "Android 10" in gap[0]["title"], f
+    assert "no data, not smooth" in gap[0]["detail"]
+    assert not any(x["kind"] == "no_frametimeline" for x in f), "nothing to re-record on this phone"
+    assert not any(x["kind"] == "jank_rate" for x in f), \
+        "frames with no deadlines must not produce a jank result"
+
+
+@case
+def old_phone_interactive_capture_is_a_medium_gap_not_a_capture_to_redo():
+    hs, f = run(old_phone(), mode="interactive")
+    gap = [x for x in f if x["kind"] == "frames_unsupported"][0]
+    assert gap["severity"] == "medium" and "Do not report a jank result" in gap["action"], gap
+    assert not any(x["severity"] == "blocker" for x in f), f
+
+
+@case
+def sdk_level_is_read_from_the_fingerprint_when_the_trace_has_no_sdk():
+    hs, _ = run(old_phone(sdk="[NULL]",
+                          fingerprint="google/sargo/sargo:10/QQ3A.200805.001/6578210:user/release-keys"))
+    assert hs["device"] == {"sdk": 29, "android": "10"} and hs["frames"] == "unsupported", hs
+    hs, _ = run(old_phone(sdk="[NULL]", fingerprint=""))
+    assert hs["device"] == {"sdk": None, "android": None} and hs["frames"] == "not_recorded", hs
+
+
+@case
+def new_phone_with_no_frame_timeline_is_still_a_capture_to_redo():
+    hs, f = run(old_phone(sdk="34"))
+    assert hs["frames"] == "not_recorded", hs
+    assert [x["severity"] for x in f if x["kind"] == "no_frametimeline"] == ["blocker"], f
+    assert not any(x["kind"] == "jank_rate" for x in f)
+
+
+@case
+def write_into_file_without_flush_is_a_note_not_a_failed_capture():
+    hs, f = run(base(health=[["config_write_into_file_no_flush", "1"]]))
+    assert hs["trace_health"] == "pass" and hs["verdict"] == "trusted", hs
+    note = [x for x in f if x["kind"] == "no_flush_period"]
+    assert note and note[0]["severity"] == "info" and "No data is lost" in note[0]["detail"], f
+    assert not any(x["kind"] == "trace_errors" for x in f)
+    hs, f = run(base(health=[["config_write_into_file_no_flush", "1"], ["traced_buf_chunks_overwritten", "9"]]))
+    assert hs["trace_health"] == "fail" and hs["verdict"] == "not_trustworthy", hs
+    err = [x for x in f if x["kind"] == "trace_errors"][0]
+    assert "traced_buf_chunks_overwritten" in err["detail"] and "no_flush" not in err["detail"], err
+
+
+@case
+def binder_with_no_interface_name_is_titled_by_the_process_called():
+    r = base()
+    r["30_binder_main_thread"] = (["client_process", "aidl_name", "server_process", "n", "total_ms", "max_ms"],
+                                  [[PKG, "unknown", "system_server", "318", "79", "5.6"]])
+    _, f = run(r)
+    b = [x for x in f if x["kind"] == "main_binder"][0]
+    assert b["title"] == "Main-thread binder: calls to system_server cost 79 ms", b["title"]
+    assert "does not name the interface" in b["detail"]
+    r["30_binder_main_thread"][1][0][1] = "android.app.IActivityManager"
+    _, f = run(r)
+    assert [x for x in f if x["kind"] == "main_binder"][0]["title"] == \
+        "Main-thread binder: android.app.IActivityManager costs 79 ms"
+
+
+@case
+def start_with_no_recorded_type_over_500_ms_is_reported_not_dropped():
+    r = base()
+    r["10_startup_summary"] = (STARTUP_H, [["1", PKG, "[NULL]", "690", "681", "[NULL]"]])
+    _, f = run(r)
+    s = [x for x in f if x["kind"] == "slow_start"]
+    assert s and s[0]["severity"] == "medium" and "681 ms" in s[0]["title"], f
+    assert "treat it as cold" in s[0]["detail"]
+
+
+@case
+def heavy_jit_is_flagged_only_when_it_is_a_real_share_of_the_capture():
+    def jit(ms, span):
+        r = base(cov=["1000", "500", "90", "40", "30", "800", str(span)])
+        r["40_slice_hotspots"] = (["name", "thread_name", "n", "total_ms", "self_ms"],
+                                  [["Compiling", "Jit thread pool", "600", str(ms), str(ms)],
+                                   ["Compiling", "some other thread", "5", "9000", "9000"]])
+        return [x for x in run(r)[1] if x["kind"] == "jit_compile"]
+    hit = jit(1844, 10000)
+    assert hit and hit[0]["severity"] == "medium" and "18%" in hit[0]["title"], hit
+    assert "speed-profile" in hit[0]["action"]
+    assert not jit(300, 10000), "300 ms of JIT is normal"
+    assert not jit(600, 60000), "1% of a long capture is normal"
+
+
 def main():
     failed = 0
     for fn in CASES:

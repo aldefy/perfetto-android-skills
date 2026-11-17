@@ -216,6 +216,16 @@ def run_metrics(out_dir, pkg):
     jank = load_csv(out_dir, "20_jank_summary.csv") or []
     j = next((r for r in jank if _matches(r.get("process_name", ""), pkg)), None) \
         if pkg and pkg != "*" else (jank[0] if jank else None)
+    # No frame timeline (a phone older than Android 12, or a config without it)
+    # means no deadlines: every run would read "0% late". Leave those out, so a
+    # comparison never reports "no change" for something it could not measure.
+    cov = load_csv(out_dir, "01_coverage.csv") or []
+    deadlines = not cov or (_num(cov[0].get("frametimeline_rows")) or 0) > 0
+    if j and not deadlines:
+        v = _num(j.get("frames"))
+        if v is not None:
+            m["frames"] = v
+        j = None
     if j:
         for key, label in (("frames", "frames"), ("janky_pct", "late frames (%)"),
                            ("worst_overrun_ms", "worst overrun (ms)"),
@@ -233,6 +243,11 @@ def run_metrics(out_dir, pkg):
         m["main-thread binder (ms)"] = sum(
             _num(r.get("total_ms")) or 0 for r in calls
             if pkg and pkg != "*" and _matches(r.get("client_process", ""), pkg))
+    slices = load_csv(out_dir, "40_slice_hotspots.csv")
+    if slices is not None:
+        m["JIT compile (ms)"] = sum(
+            _num(r.get("total_ms")) or 0 for r in slices
+            if r.get("name") == "Compiling" and str(r.get("thread_name", "")).startswith("Jit thread"))
     # the app's own trace sections, when triage was run with --app-repo
     try:
         with open(os.path.join(out_dir, "findings.json")) as fh:
