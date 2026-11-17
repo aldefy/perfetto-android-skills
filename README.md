@@ -9,8 +9,8 @@ run it the same way every time: capture a real trace, ask the same four
 questions in the same order, rank findings by *self* time, map slice names
 back to files in your repo, then measure again after the fix.
 
-Built for [BLR Droid](https://trace-to-triage.pages.dev), a talk on reading
-Perfetto traces and automating that reading.
+Built alongside the talk [From Trace to Triage](https://trace-to-triage.pages.dev),
+on reading Perfetto traces and automating that reading.
 
 ## What's inside
 
@@ -22,7 +22,7 @@ perfetto-triage/
     triage.py                  parses a trace once, runs the query pack, writes a ranked report
     remeasure.py                diffs two triage-out directories: findings, jank numbers, self-time hotspots
     ab_startup.sh               adb-only before/after harness when a benchmark module is out of scope
-  queries/                    18 PerfettoSQL files, 00_health.sql through 41_anrs.sql
+  queries/                    20 PerfettoSQL files, 00_health.sql through 41_anrs.sql
   references/
     reading-a-trace.md         the human mental model: what a track/slice/timeline actually means
     sql-cookbook.md             PerfettoSQL schema and idioms for questions the query pack doesn't cover
@@ -60,14 +60,40 @@ optimizing code that was never running.
 perfetto-triage/scripts/capture.sh com.example.app                  # cold start
 perfetto-triage/scripts/capture.sh com.example.app --interactive 20 # you drive, it records
 
-# 2. triage — parses once, runs all 18 queries, writes a ranked report
+# 2. triage — parses once, runs all 20 queries, writes a ranked report
 python3 perfetto-triage/scripts/triage.py trace.pftrace --pkg com.example.app --out triage-out
 
-# 3. read triage-out/report.md — findings worst-first, each with a next action
+# 3. read triage-out/report.md — Trust check first, then findings worst-first
 ```
+
+`capture.sh` refuses a debuggable build (exit 3). Pass `--allow-debug` to
+capture one anyway; the report will flag it.
 
 No trace file and no device means nothing runs. This skill will not
 fabricate a measurement. See the hard rules in `SKILL.md`.
+
+## Trust check
+
+Question 1 is answered by the tool, not left to the reader. `report.md` opens
+with a Trust check table and `findings.json` carries the same data as a
+`health_status` block:
+
+| Field | Values | Read from |
+|---|---|---|
+| `trace_health` | `pass`, `fail`, `unknown` | `00_health`: zero error rows is the pass case |
+| `coverage.<source>` | `ok`, `missing`, `unknown` | `01_coverage`: a zero means that source was never recorded |
+| `build_type` | `release`, `debuggable`, `unknown` | `03_build_type`: `package_list.debuggable` in the trace |
+| `startup_capture` | `ok`, `missed`, `not_expected`, `unknown` | `10_startup_summary` plus the capture mode |
+| `verdict` | `trusted`, `directional_only`, `not_trustworthy` | all of the above |
+
+`unknown` always means the check did not run or could not decide. It never
+means pass, and an unknown build type is never treated as release. When the
+verdict is not `trusted`, every finding carries `directional_only: true`:
+the code paths it points at are real, the numbers are not quotable.
+
+`triage.py` works out whether a launch was expected from a `capture.sh`
+filename (`<pkg>-startup-<stamp>.pftrace`). For a trace named some other way,
+pass `--mode startup` or `--mode interactive`.
 
 ## Fix and re-measure
 
@@ -85,7 +111,8 @@ python3 perfetto-triage/scripts/triage.py after.pftrace --pkg com.example.app --
 python3 perfetto-triage/scripts/remeasure.py triage-out after-out
 ```
 
-`remeasure.py` prints resolved findings, new findings, what's still present,
+`remeasure.py` prints the trust verdict for each side (and warns when the
+build types differ), then resolved findings, new findings, what's still present,
 jank numbers side by side, and the top self-time hotspots side by side. It
 does not collapse this into a single "% improvement" number on purpose.
 Report the median of at least 10 runs, not the best one, or say plainly that
@@ -93,15 +120,26 @@ you didn't.
 
 ## Source app
 
-The BLR Droid talk used [StickerExplode](https://github.com/aldefy/StickerExplode)
+The talk uses [StickerExplode](https://github.com/aldefy/StickerExplode)
 (public) on a Pixel 9 Pro Fold, release build, as the test app. Known issues
-hit during that session: a debug-build contamination bug (fixed in
-`capture.sh`'s verification), and a capture race condition in
-`android_startups` (fixed by increasing the delay between starting the trace
-and force-stopping the app). One applied fix: a custom AGSL shader skipped
-when the device is near-flat, which produced a partial improvement, not a
-full fix. See `perfetto-triage-eval/` for the known failure modes this
-surfaced.
+hit while preparing it:
+
+- A debug-build capture produced nine confident findings with no warning.
+  `capture.sh` now refuses debuggable builds and `triage.py` reads the build
+  type from the trace. The guard is written and tested on synthetic data, but
+  not yet proven on a real debuggable capture.
+- A capture race in `android_startups` left the startup section silently
+  empty. The delay between starting the trace and force-stopping the app was
+  increased, and `triage.py` now reports a missed launch as a failed capture.
+- An empty `00_health` (good) and a zero in `01_coverage` (bad) looked alike.
+  Both are now explicit fields.
+
+One applied app fix: a custom AGSL shader skipped when the device is
+near-flat, which produced a partial improvement, not a full fix.
+
+`perfetto-triage-eval/` holds the real fixtures from those incidents and an
+eval that reruns the current code against them. Current state: 2 of 3 traps
+pass, 1 is unproven. See `perfetto-triage-eval/KNOWN-TRAPS.md`.
 
 ## Agent skill installation guide
 
@@ -173,7 +211,7 @@ a markdown file and run shell commands can use this.
 add`) rather than a flat skills folder. We have not packaged this repo as a
 Codex plugin yet and do not want to guess at the manifest format in a
 document other people will follow. If you use Codex, the fastest path
-tonight is to point it at `perfetto-triage/SKILL.md` directly and ask it to
+is to point it at `perfetto-triage/SKILL.md` directly and ask it to
 follow the workflow as a runbook. A proper plugin package is on the list;
 contributions welcome.
 
@@ -184,6 +222,6 @@ We have not verified a specific install path for these yet.
 
 ## Talk
 
-**From Trace to Triage: Reading Perfetto, Then Automating It**, BLR Droid,
-2026. Deck, live demo screenshots, and the real traces this skill produced
-are at [trace-to-triage.pages.dev](https://trace-to-triage.pages.dev).
+**From Trace to Triage: Reading Perfetto, Then Automating It**, first given
+at BLR Droid, 2026. Deck, live demo screenshots, and the real traces this
+skill produced are at [trace-to-triage.pages.dev](https://trace-to-triage.pages.dev).

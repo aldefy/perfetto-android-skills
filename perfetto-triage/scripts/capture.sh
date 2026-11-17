@@ -4,15 +4,32 @@
 #
 #   ./capture.sh com.example.app                 # cold start capture
 #   ./capture.sh com.example.app --interactive 20 # capture while you drive the app
+#   ./capture.sh com.example.app --allow-debug    # capture a debuggable build anyway
+#
+# Refuses a debuggable build by default: it runs 2 to 5x slower than release and
+# its numbers are not real. --allow-debug captures it anyway; triage.py reads the
+# build type back out of the trace and marks every finding directional only.
 #
 # Output: ./traces/<pkg>-<mode>-<n>.pftrace
 set -euo pipefail
 
-PKG="${1:?usage: capture.sh <package> [--interactive SECONDS]}"
+USAGE="usage: capture.sh <package> [--interactive SECONDS] [--allow-debug]"
+PKG="${1:?$USAGE}"
 shift || true
 MODE="startup"
 SECS=12
-if [[ "${1:-}" == "--interactive" ]]; then MODE="interactive"; SECS="${2:-20}"; fi
+ALLOW_DEBUG=0
+while (( $# > 0 )); do
+  case "$1" in
+    --interactive)
+      MODE="interactive"
+      if [[ "${2:-}" =~ ^[0-9]+$ ]]; then SECS="$2"; shift; else SECS=20; fi
+      ;;
+    --allow-debug) ALLOW_DEBUG=1 ;;
+    *) echo "[capture] ERROR: unknown argument '$1'" >&2; echo "$USAGE" >&2; exit 64 ;;
+  esac
+  shift
+done
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CFG="$HERE/../assets/startup_jank.pbtxt"
@@ -35,6 +52,29 @@ if ! adb shell pm list packages | tr -d '\r' | grep -x "package:$PKG" >/dev/null
   echo "[capture] Installed packages matching:" >&2
   adb shell pm list packages | tr -d '\r' | grep -i "${PKG%%.*}" >&2 || true
   exit 2
+fi
+
+# Build type. dumpsys prints the ApplicationInfo flags as `flags=[ ... ]` or
+# `pkgFlags=[ ... ]` depending on the Android version; DEBUGGABLE is in that list
+# for a debuggable APK.
+DUMP=$(adb shell dumpsys package "$PKG" 2>/dev/null | tr -d '\r' || true)
+FLAG_LINES=$(grep -E '^[[:space:]]*(pkgFlags|flags)=\[' <<<"$DUMP" || true)
+if [[ -z "$FLAG_LINES" ]]; then
+  echo "[capture] WARNING: could not read package flags for $PKG, so the build" \
+       "type is NOT verified. triage.py will check it again from the trace."
+elif grep -qw DEBUGGABLE <<<"$FLAG_LINES"; then
+  if (( ALLOW_DEBUG )); then
+    echo "[capture] WARNING: $PKG is a DEBUGGABLE build. Capturing anyway" \
+         "(--allow-debug). Every number from this trace is directional only."
+  else
+    echo "[capture] ERROR: $PKG is a DEBUGGABLE build. It runs 2 to 5x slower than" >&2
+    echo "[capture] release, so a trace of it does not represent what users get." >&2
+    echo "[capture] Install a release or release-like build, or pass --allow-debug" >&2
+    echo "[capture] to capture it anyway and have the report flagged." >&2
+    exit 3
+  fi
+else
+  echo "[capture] build type: not debuggable"
 fi
 
 # Keep the screen on and awake; a dozing device produces garbage traces.

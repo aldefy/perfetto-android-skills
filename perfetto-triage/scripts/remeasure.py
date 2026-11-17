@@ -42,6 +42,34 @@ def load_csv(out_dir, name):
         return list(csv.DictReader(fh))
 
 
+def trust_line(label, data):
+    """One line per side from findings.json's health_status block. Reports
+    written before that block existed have none, and say so."""
+    hs = data.get("health_status")
+    if not hs:
+        return f"{label}: no health_status in findings.json (older triage.py). Trust not checked."
+    why = f" ({'; '.join(hs.get('reasons', []))})" if hs.get("reasons") else ""
+    return (f"{label}: {hs.get('verdict', '?')}, build {hs.get('build_type', '?')}, "
+            f"startup capture {hs.get('startup_capture', '?')}{why}")
+
+
+def diff_trust(before, after):
+    print("## Trust\n")
+    print("  " + trust_line("before", before))
+    print("  " + trust_line("after ", after))
+    b, a = before.get("health_status") or {}, after.get("health_status") or {}
+    warnings = []
+    if b and a and b.get("build_type") != a.get("build_type"):
+        warnings.append(f"build types differ ({b.get('build_type')} vs {a.get('build_type')}): "
+                        "this is not a like-for-like comparison")
+    for label, hs in (("before", b), ("after", a)):
+        if hs and hs.get("verdict") != "trusted":
+            warnings.append(f"{label} is {hs.get('verdict')}: do not quote its numbers")
+    for w in warnings:
+        print(f"  WARNING: {w}")
+    print()
+
+
 def diff_findings(before, after):
     before_titles = {f["title"]: f for f in before["findings"]}
     after_titles = {f["title"]: f for f in after["findings"]}
@@ -126,6 +154,7 @@ def main():
     print(f"before: {before.get('trace', '?')}")
     print(f"after:  {after.get('trace', '?')}\n")
 
+    diff_trust(before, after)
     diff_findings(before, after)
     if pkg:
         diff_jank(args.before_dir, args.after_dir, pkg)
