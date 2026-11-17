@@ -525,7 +525,7 @@ def strip_chart(segments: list[tuple[str, float, str | None]], label: str, fmt=m
             f'{"".join(cells)}</div><ul class="legend">{"".join(legend)}</ul></div>')
 
 
-def bar_chart(rows: list[tuple[str, float, str]], label: str) -> str:
+def bar_chart(rows: list[tuple[str, float, str]], label: str, fmt=ms) -> str:
     """Ranked horizontal bars. rows = [(name, value, note)]. Drawn in the
     accent colour: this is the one chart that takes the app's own colour."""
     rows = [r for r in rows if r[1] is not None and r[1] > 0]
@@ -538,7 +538,7 @@ def bar_chart(rows: list[tuple[str, float, str]], label: str) -> str:
         out.append(
             f'<div class="bar-row"><span class="bar-name" title="{esc(name)}">{badge}{esc(name)}</span>'
             f'<span class="bar-track"><span class="bar-fill" style="width:{100 * value / top:.2f}%">'
-            f'</span></span><span class="bar-val">{esc(ms(value))}'
+            f'</span></span><span class="bar-val">{esc(fmt(value))}'
             f'{"<i>" + esc(note) + "</i>" if note else ""}</span></div>')
     out.append("</div>")
     return "".join(out)
@@ -832,6 +832,31 @@ def q3_frames(out_dir: str, pkg: str, hs: dict | None) -> str:
                                        ("RenderThread (DrawFrame)", rt, ""),
                                        ("Waiting to start (vsync delay)", vs, "")],
                                       "Time in late frames by stage"), means))
+    sections = read_csv(out_dir, "24_jank_by_app_section")
+    hit = [r for r in sections if (num(r.get("late_frames")) or 0) > 0][:8]
+    if hit:
+        all_late = num(hit[0].get("all_late_frames")) or 0
+        inside = num(hit[0].get("late_frames_in_any_section")) or 0
+        top = hit[0]
+        rows = [(r.get("section", ""), num(r.get("late_frames")),
+                 f"worst +{ms(num(r.get('worst_overrun_ms')))} · ran {r.get('times_run', '')}x",
+                 "your code") for r in hit]
+        means = (f"{num(top.get('late_frames')):.0f} of the {all_late:.0f} late frames happened "
+                 f"while {top.get('section')} was running, so that section is the first place to "
+                 f"look. Overlap is not proof it caused them: a section that is simply long "
+                 f"overlaps more frames. {inside:.0f} of {all_late:.0f} late frames fall inside "
+                 f"at least one of the app's sections.")
+        parts.append(figure("Late frames by the app's own trace sections",
+                            "Each bar is one trace section the app declares. Its length is the "
+                            "number of late frames that overlap it in time.",
+                            bar_chart(rows, "Late frames per app trace section",
+                                      fmt=lambda v: f"{v:.0f} late"), means,
+                            "Press / and search for the section name. The late frames sit on "
+                            "the Actual Timeline track at the same time."))
+    elif sections:
+        parts.append('<p class="empty">The app\'s trace sections ran in this trace, but no late '
+                     'frame overlaps any of them. The late frames come from work that is not '
+                     'inside a section yet.</p>')
     return "".join(p for p in parts if p)
 
 

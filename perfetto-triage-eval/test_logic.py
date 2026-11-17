@@ -262,6 +262,24 @@ def a_query_that_times_out_returns_an_error_instead_of_raising():
     assert (header, rows) == ([], []) and err == "timed out after 0.2s", err
 
 
+@case
+def compose_work_is_handed_to_the_compose_skill_only_when_it_is_big_enough():
+    hot = lambda rows: {"23_jank_hot_slices": (["name", "n", "total_ms", "max_ms"], rows)}
+    handoffs, found = triage.related_skills(hot([["Recomposer:recompose", "40", "420", "30"],
+                                                 ["Compose:recompose", "40", "300", "20"],
+                                                 ["traversal", "40", "900", "60"]]))
+    assert [h["skill"] for h in handoffs] == ["compose-expert"], handoffs
+    assert handoffs[0]["repo"] == "aldefy/compose-skill"
+    assert handoffs[0]["slices"] == ["Recomposer:recompose", "Compose:recompose"]
+    assert "/plugin install compose-expert" in handoffs[0]["install"]["Claude Code"]
+    f = found[0]
+    assert f["severity"] == "info" and f["area"] == "code" and f["source"] == ["23_jank_hot_slices"]
+    assert "Ask before installing anything" in f["action"]
+    assert triage.related_skills(hot([["Compose:recompose", "2", "9", "6"]])) == ([], []), \
+        "9 ms of Compose is not worth a hand-off"
+    assert triage.related_skills(hot([["traversal", "40", "900", "60"]])) == ([], [])
+
+
 def main():
     failed = 0
     for fn in CASES:

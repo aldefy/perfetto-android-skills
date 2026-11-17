@@ -700,6 +700,56 @@ def analyse(results: dict, pkg: str, mode: str = "unknown",
     return f
 
 
+RELATED_SKILLS = [{
+    "skill": "compose-expert",
+    "repo": "aldefy/compose-skill",
+    "match": r"^(Recomposer:|Compose:)|recompos",
+    "what": "Compose runtime work",
+    "covers": "recomposition, state, lazy lists, animation and Compose performance",
+    "install": {
+        "Claude Code": "/plugin marketplace add aldefy/compose-skill, then "
+                       "/plugin install compose-expert",
+        "Copilot CLI": "copilot plugin install aldefy/compose-skill",
+        "any agent": "git clone https://github.com/aldefy/compose-skill and copy "
+                     "skills/compose-expert into the agent's skills folder",
+    },
+}]
+
+
+def related_skills(results: dict) -> tuple[list[dict], list[dict]]:
+    """Findings that belong to another skill's field, and where to get it.
+    Returns (handoffs for findings.json, findings for the report)."""
+    handoffs, found = [], []
+    for rel in RELATED_SKILLS:
+        hits, stems = {}, []
+        for stem, name_col, ms_col in (("23_jank_hot_slices", "name", "total_ms"),
+                                       ("40_slice_hotspots", "name", "self_ms"),
+                                       ("13_startup_top_slices", "slice_name", "total_ms")):
+            for row in as_dicts(*results.get(stem, ([], []))):
+                name, value = row.get(name_col) or "", num(row.get(ms_col)) or 0
+                if value > 0 and re.search(rel["match"], name):
+                    hits[name] = max(hits.get(name, 0), value)
+                    if stem not in stems:
+                        stems.append(stem)
+        top = sorted(hits.items(), key=lambda kv: -kv[1])
+        total = sum(v for _, v in top)
+        if total < rel.get("min_ms", 50):
+            continue    # too small to be worth sending anyone to another skill
+        handoffs.append({"skill": rel["skill"], "repo": rel["repo"], "covers": rel["covers"],
+                         "install": rel["install"], "slices": [n for n, _ in top[:8]]})
+        found.append({
+            "severity": "info", "area": "code",
+            "title": f"{rel['what']} ranks in this trace: the fix belongs to {rel['skill']}",
+            "detail": "Slices: " + ", ".join(f"{n} ({v:.0f} ms)" for n, v in top[:5])
+                      + f". About {total:.0f} ms across them. The trace shows how much this "
+                        f"work costs, not which composable causes it.",
+            "action": f"Use the {rel['skill']} skill ({rel['repo']}) for the fix. It covers "
+                      f"{rel['covers']}. If it is not installed, on Claude Code: "
+                      f"{rel['install']['Claude Code']}. Ask before installing anything.",
+            "source": stems, "directional_only": False})
+    return handoffs, found
+
+
 def unfinished_findings(errors: dict) -> list[dict]:
     """A query that failed or timed out leaves an empty section, and an empty
     section reads as 'nothing wrong'. Say plainly that it was never answered."""
@@ -775,7 +825,8 @@ SECTIONS = [
      ["10_startup_summary", "11_startup_breakdown", "12_startup_main_thread_state",
       "13_startup_top_slices", "14_startup_class_loading", "15_startup_binder"]),
     ("Jank: which frames missed, and whose fault was it?",
-     ["20_jank_summary", "21_worst_frames", "22_jank_cpu_split", "23_jank_hot_slices"]),
+     ["20_jank_summary", "21_worst_frames", "22_jank_cpu_split", "23_jank_hot_slices",
+      "24_jank_by_app_section"]),
     ("Blocking: binder, IPC and locks",
      ["30_binder_main_thread", "31_binder_why_slow", "32_monitor_contention",
       "33_main_thread_blocking"]),
@@ -823,14 +874,27 @@ def main():
         wanted = [w.strip() for w in args.only.split(",")]
         stems = [s for s in stems if any(s.startswith(w) for w in wanted)]
 
+    cmod, index, section_sql = None, None, None
+    if args.app_repo:
+        try:  # everything --app-repo adds is a convenience and must never fail a triage
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                "code_map", os.path.join(HERE, "code_map.py"))
+            cmod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(cmod)
+            log("reading the app's source for trace sections")
+            index = cmod.scan_repo(args.app_repo)
+            section_sql = cmod.section_match_sql(index)
+            log(f"{index['scanned']} source files, {len(index['sections'])} trace sections declared")
+        except Exception as exc:
+            log(f"code map skipped: {exc}")
+            cmod = None
+
     results, errors = {}, {}
     started = time.time()
     log(f"{len(stems)} queries to run. Phases: load, query, report.")
     with Session(tp, args.trace) as sess:
-        for i, stem in enumerate(stems, 1):
-            tag = f"[{i}/{len(stems)}] {stem}"
-            src = os.path.join(QUERY_DIR, stem + ".sql")
-            sql = open(src).read().replace("__PKG__", args.pkg)
+        def run_query(tag, stem, sql):
             run_path = os.path.join(tmpdir, stem + ".sql")
             open(run_path, "w").write(sql)
             t0 = time.time()
@@ -842,7 +906,7 @@ def main():
                 log(f"{tag}: FAILED after {took:.1f}s: {err.splitlines()[-1][:160]}")
                 if err.startswith("timed out") and sess.remote:
                     sess.restart()
-                continue
+                return
             results[stem] = (header, rows)
             with open(os.path.join(args.out, "csv", stem + ".csv"), "w", newline="") as fh:
                 w = csv.writer(fh)
@@ -851,26 +915,38 @@ def main():
                     w.writerows(rows)
             log(f"{tag}: {len(rows)} rows in {took:.1f}s")
 
+        for i, stem in enumerate(stems, 1):
+            sql = open(os.path.join(QUERY_DIR, stem + ".sql")).read().replace("__PKG__", args.pkg)
+            run_query(f"[{i}/{len(stems)}] {stem}", stem, sql)
+
+        if section_sql and not args.only:
+            # late frames grouped under the app's own trace sections
+            stem = "24_jank_by_app_section"
+            sql = open(os.path.join(QUERY_DIR, "on_demand", stem + ".sql")).read()
+            run_query(f"[app sections] {stem}", stem,
+                      sql.replace("__PKG__", args.pkg).replace("__SECTION_MATCH__", section_sql))
+
     log("queries done, working out the findings")
     status = health_status(results, args.pkg, mode)
     findings = analyse(results, args.pkg, mode, status)
     findings = unfinished_findings(errors) + findings
 
+    handoffs, extra = related_skills(results)
+    order = {"blocker": 0, "high": 1, "medium": 2, "info": 3}
     code_map = None
-    if args.app_repo:
+    if cmod:
         log("checking hot slice names against the app's source")
-        try:  # a convenience on top of the findings; it must never fail a triage
-            import importlib.util
-            spec = importlib.util.spec_from_file_location(
-                "code_map", os.path.join(HERE, "code_map.py"))
-            cmod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(cmod)
-            code_map = cmod.build(results, args.app_repo, args.pkg)
-            order = {"blocker": 0, "high": 1, "medium": 2, "info": 3}
-            findings = sorted(findings + cmod.findings(code_map),
-                              key=lambda x: order.get(x["severity"], 9))
+        try:
+            code_map = cmod.build(results, args.app_repo, args.pkg, index)
+            extra += cmod.findings(code_map)
+            by_section = cmod.section_findings(
+                as_dicts(*results.get("24_jank_by_app_section", ([], []))))
+            for f in by_section:
+                f["directional_only"] = status["verdict"] != "trusted"
+            extra += by_section
         except Exception as exc:
             log(f"code map skipped: {exc}")
+    findings = sorted(findings + extra, key=lambda x: order.get(x["severity"], 9))
 
     # ---- report.md
     icon = {"blocker": "🛑", "high": "🔴", "medium": "🟠", "info": "🔵"}
@@ -928,7 +1004,10 @@ def main():
         out.append("")
         for stem in group:
             out.append(f"#### `{stem}`")
-            desc = leading_comment(os.path.join(QUERY_DIR, stem + ".sql"))
+            src_sql = os.path.join(QUERY_DIR, stem + ".sql")
+            if not os.path.exists(src_sql):
+                src_sql = os.path.join(QUERY_DIR, "on_demand", stem + ".sql")
+            desc = leading_comment(src_sql)
             if desc:
                 out.append("")
                 out.append(f"> {desc}")
@@ -955,6 +1034,8 @@ def main():
                    "health_status": status, "findings": findings}
         if code_map:
             payload["code_map"] = code_map
+        if handoffs:
+            payload["handoffs"] = handoffs
         json.dump(payload, fh, indent=2)
 
     visual = None

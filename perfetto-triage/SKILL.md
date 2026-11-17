@@ -228,6 +228,13 @@ a framework slice. The result is the "Whose code" table in `report.md`,
 name built at runtime, or code in a dependency, will not be found. Check the
 ones that matter by hand.
 
+When the app does declare trace sections, `--app-repo` also answers "which
+part of the app was running when frames were late". `24_jank_by_app_section`
+counts the late frames that overlap each section, the report draws them as
+"Late frames by the app's own trace sections", and `remeasure.py` gives each
+section its own before/after row. Overlap is not blame: a long section
+overlaps more frames. Use it to decide where to add smaller sections next.
+
 Without `--app-repo`: take the top slice names from `13_startup_top_slices` /
 `23_jank_hot_slices` / `40_slice_hotspots`, then grep the repo for those literals. If almost nothing
 matches, that is itself the finding — **the app has no custom tracing**, and the
@@ -342,6 +349,25 @@ with the reason, not a guess.
   startup section on a startup capture is `startup_capture: missed`.
 - If the trace does not contain the interaction the user cares about, recapture.
   Do not reinterpret an unrelated trace to fit the question.
+
+## Related skills
+
+Triage says where the time goes. For some causes the fix is another skill's
+field. When triage sees one it adds a finding and a `handoffs` entry in
+`findings.json` with the skill, the repo and the install command.
+
+| Triage sees | Hand the fix to | Install |
+|---|---|---|
+| `Recomposer:*` / `Compose:*` slices worth 50 ms or more | `compose-expert` ([aldefy/compose-skill](https://github.com/aldefy/compose-skill)): recomposition, state, lazy lists, animation | Claude Code: `/plugin marketplace add aldefy/compose-skill`, then `/plugin install compose-expert`. Copilot CLI: `copilot plugin install aldefy/compose-skill` |
+
+Check your own skill list first. If `compose-expert` is there, use it. If it
+is not, tell the person which command installs it and ask before installing
+anything: slash commands are theirs to type, and copying a skill into their
+skills folder is their call. Then come back here to re-measure (Step 6), so
+the Compose fix is proven the same way as any other.
+
+To count recompositions directly instead of inferring them from a trace, see
+[compose-rebound](https://github.com/aldefy/compose-rebound).
 
 ## Reference files
 

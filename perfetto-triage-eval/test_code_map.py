@@ -44,7 +44,7 @@ APP = {
         "package com.example.app\n"
         "class FeedRepo {\n"
         "    suspend fun load(page: Int) = trace(\"Feed.load\") { api.get(page) }\n"
-        "    fun stage(name: String) = trace(\"v3.$name\") { }\n"
+        "    fun stage(name: String) = trace(\"checkout.$name\") { }\n"
         "    fun decode() { Trace.beginSection(\"decodeImages\"); Trace.endSection() }\n"
         "}\n",
     "app/src/main/java/com/example/app/MainActivity.kt":
@@ -74,10 +74,10 @@ def test_trace_sections_are_found_with_file_and_line():
 
 def test_template_sections_match_their_runtime_names():
     index = cm.scan_repo(tree(APP))
-    assert owner("v3.orb", index)["evidence"].endswith("FeedRepo.kt:4")
-    assert owner("v3.keyboard hiding", index)["owner"] == "app"
-    assert owner("v3.", index)["owner"] == "other", "the variable part must not be empty"
-    assert owner("v4.orb", index)["owner"] == "other"
+    assert owner("checkout.pay", index)["evidence"].endswith("FeedRepo.kt:4")
+    assert owner("checkout.address form", index)["owner"] == "app"
+    assert owner("checkout.", index)["owner"] == "other", "the variable part must not be empty"
+    assert owner("billing.pay", index)["owner"] == "other"
 
 
 def test_file_reference_and_class_method():
@@ -142,10 +142,10 @@ def test_finding_when_sections_exist_but_do_not_rank():
 
 
 def test_finding_lists_the_apps_own_slices():
-    out = cm.build(results([("traversal", 900), ("Feed.load", 300), ("v3.orb", 120)]),
+    out = cm.build(results([("traversal", 900), ("Feed.load", 300), ("checkout.pay", 120)]),
                    tree(APP), PKG)
     assert out["app_owned"] == 2 and out["named_after_app_code"] == 2, out
-    assert [s["name"] for s in out["slices"]] == ["traversal", "Feed.load", "v3.orb"]
+    assert [s["name"] for s in out["slices"]] == ["traversal", "Feed.load", "checkout.pay"]
     f = cm.findings(out)
     assert f[0]["severity"] == "info", f
     assert f[0]["title"] == "2 of 3 hot slices are named after the app's own code"
@@ -177,6 +177,55 @@ def test_report_marks_the_apps_slices_and_escapes_them():
     assert vr.esc("1 of these 2 names leads into the app's own code and is marked") in page
     assert "<b>x</b>" not in page and "&lt;b&gt;x&lt;/b&gt;.kt:3" in page
     assert '<span class="tag">inference</span><b>What it means.</b>' in page
+
+
+def test_section_filter_sql_is_escaped():
+    index = cm.scan_repo(tree({"app/src/main/java/S.kt":
+        "fun a() = trace(\"Feed.load\") { }\n"
+        "fun b(n: String) = trace(\"checkout.$n\") { }\n"
+        "fun c(n: String) = trace(\"draw-VRI[$n]\") { }\n"
+        "fun d() = trace(\"it's 100% [done]*\") { }\n"
+        "fun e(n: String) = trace(\"$n\") { }\n"}))
+    sql = cm.section_match_sql(index, "s.name")
+    assert sql == ("s.name IN ('Feed.load', 'it''s 100% [done]*') "
+                   "OR s.name GLOB 'checkout.*' OR s.name GLOB 'draw-VRI[[]*]'"), sql
+    assert cm.section_match_sql(cm.scan_repo("/nonexistent")) is None
+
+
+def test_late_frames_by_section_findings():
+    def row(section, late, all_late=40, inside=30, worst=90):
+        return {"section": section, "times_run": "3", "total_ms": "500", "late_frames": str(late),
+                "all_late_frames": str(all_late), "late_frames_in_any_section": str(inside),
+                "worst_overrun_ms": str(worst)}
+    f = cm.section_findings([row("checkout.stage.pay", 22), row("checkout.stage.cart", 8),
+                             row("checkout.stage.idle", 0)])
+    assert len(f) == 1 and f[0]["severity"] == "medium" and f[0]["area"] == "jank", f
+    assert f[0]["title"] == "22 of 40 late frames overlap checkout.stage.pay", f[0]["title"]
+    assert "55% of the late frames" in f[0]["detail"] and "checkout.stage.cart (8)" in f[0]["detail"]
+    assert "Overlap is not proof" in f[0]["action"] and f[0]["source"] == ["24_jank_by_app_section"]
+    small = cm.section_findings([row("checkout.stage.pay", 4)])
+    assert small[0]["severity"] == "info", "10% of late frames is a pointer, not a finding to act on"
+    none = cm.section_findings([row("checkout.stage.pay", 0, inside=0)])
+    assert none[0]["title"] == "No late frame overlaps any of the app's trace sections", none
+    assert cm.section_findings([]) == [] and cm.section_findings([row("x", 0, all_late=0)]) == []
+
+
+def test_report_draws_late_frames_by_section():
+    import json
+    out_dir = tempfile.mkdtemp(prefix="cm-out-")
+    os.makedirs(os.path.join(out_dir, "csv"))
+    with open(os.path.join(out_dir, "csv", "20_jank_summary.csv"), "w") as fh:
+        fh.write("process_name,frames,janky,janky_pct,big_jank,huge_jank,worst_overrun_ms,app_jank,sf_jank\n"
+                 f"{PKG},100,40,40,3,0,90,30,5\n")
+    with open(os.path.join(out_dir, "csv", "24_jank_by_app_section.csv"), "w") as fh:
+        fh.write("section,times_run,total_ms,late_frames,all_late_frames,late_frames_in_any_section,worst_overrun_ms\n"
+                 "checkout.stage.<pay>,3,500,22,40,30,90\ncheckout.stage.idle,9,100,0,40,30,0\n")
+    json.dump({"trace": "t.pftrace", "pkg": PKG, "findings": []},
+              open(os.path.join(out_dir, "findings.json"), "w"))
+    page = vr.render(out_dir)
+    assert vr.esc("Late frames by the app's own trace sections") in page
+    assert "22 late" in page and "checkout.stage.&lt;pay&gt;" in page and "checkout.stage.<pay>" not in page
+    assert "checkout.stage.idle" not in page, "sections with no late frames are not drawn"
 
 
 CASES = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

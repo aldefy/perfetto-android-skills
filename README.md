@@ -25,6 +25,7 @@ perfetto-triage/
     remeasure.py                before against after: one run each, or many runs each with medians and a noise verdict
     ab_startup.sh               adb-only before/after harness when a benchmark module is out of scope
   queries/                    20 PerfettoSQL files, 00_health.sql through 41_anrs.sql
+    on_demand/                 run only with --app-repo: late frames by the app's own trace sections
   references/
     reading-a-trace.md         the human mental model: what a track/slice/timeline actually means
     sql-cookbook.md             PerfettoSQL schema and idioms for questions the query pack doesn't cover
@@ -285,6 +286,14 @@ There are other good skills in this space. Pick by the job:
 | [Perfetto AI skill](https://github.com/google/perfetto/tree/main/ai/skills) | Any trace question, with guided workflows for Android memory and GPU |
 | [Android profiler skill](https://github.com/android/skills) | Recording plus root-cause analysis that follows the blocking chain |
 | [premex-ab/claude-marketplace](https://github.com/premex-ab/claude-marketplace) | Android skills packaged as Claude Code plugins |
+
+## Works with
+
+Triage finds where the time goes. When the cause is Compose runtime work
+(`Recomposer:*` / `Compose:*` slices worth 50 ms or more), the report hands
+the fix to [compose-expert](https://github.com/aldefy/compose-skill) and
+prints its install command. To count recompositions directly, see
+[compose-rebound](https://github.com/aldefy/compose-rebound).
 
 ## Roadmap
 
