@@ -79,8 +79,10 @@ toggling `LAYER_TYPE_HARDWARE` per frame, avoid full-screen blurs and large
 ### `CreateGraphicsPipeline` / `CompileAfterCacheMiss` during the first animation
 **Cause:** the GPU driver compiled a shader mid-frame. Once per install per
 program — invisible to a developer whose cache is warm, hit by every user.
-**Fix:** ship a Baseline Profile (ProfileInstaller also primes the shader
-cache), and/or run the animation once offscreen behind the splash.
+**Fix:** run the animation once offscreen behind the splash, so the compile
+happens before the user is watching. A Baseline Profile does not fix this: it
+compiles the app's code ahead of time and leaves GPU shaders alone. Count the
+compile slices before and after any fix to check it did something.
 **Worth:** removes a 50–200 ms first-run stall. This is the highest
 "users notice it, developers never see it" ratio on the list.
 
