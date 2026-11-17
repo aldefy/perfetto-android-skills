@@ -293,7 +293,8 @@ def old_phone(sdk="29", fingerprint="", ft="0"):
 @case
 def old_phone_startup_capture_is_trusted_and_says_frames_cannot_be_measured():
     hs, f = run(old_phone())
-    assert hs["frames"] == "unsupported" and hs["device"] == {"sdk": 29, "android": "10"}, hs
+    assert hs["frames"] == "unsupported", hs
+    assert (hs["device"]["sdk"], hs["device"]["android"]) == (29, "10"), hs
     assert hs["verdict"] == "trusted", hs
     gap = [x for x in f if x["kind"] == "frames_unsupported"]
     assert gap and gap[0]["severity"] == "info" and "Android 10" in gap[0]["title"], f
@@ -315,17 +316,107 @@ def old_phone_interactive_capture_is_a_medium_gap_not_a_capture_to_redo():
 def sdk_level_is_read_from_the_fingerprint_when_the_trace_has_no_sdk():
     hs, _ = run(old_phone(sdk="[NULL]",
                           fingerprint="google/sargo/sargo:10/QQ3A.200805.001/6578210:user/release-keys"))
-    assert hs["device"] == {"sdk": 29, "android": "10"} and hs["frames"] == "unsupported", hs
+    assert (hs["device"]["sdk"], hs["device"]["source"]) == (29, "build fingerprint"), hs
+    assert hs["frames"] == "unsupported", hs
     hs, _ = run(old_phone(sdk="[NULL]", fingerprint=""))
-    assert hs["device"] == {"sdk": None, "android": None} and hs["frames"] == "not_recorded", hs
+    assert hs["device"] == {"sdk": None, "android": None, "source": None}, hs
+    assert hs["frames"] == "not_recorded", hs
 
 
 @case
 def new_phone_with_no_frame_timeline_is_still_a_capture_to_redo():
-    hs, f = run(old_phone(sdk="34"))
+    hs, f = run(old_phone(sdk="34"), mode="interactive")
     assert hs["frames"] == "not_recorded", hs
     assert [x["severity"] for x in f if x["kind"] == "no_frametimeline"] == ["blocker"], f
     assert not any(x["kind"] == "jank_rate" for x in f)
+    # A cold-start capture does not need the frame timeline, so there it is a note.
+    _, f = run(old_phone(sdk="34"), mode="startup")
+    gap = [x for x in f if x["kind"] == "no_frametimeline"][0]
+    assert gap["severity"] == "info" and "do not depend on it" in gap["detail"], gap
+
+
+def run_with(results, capture, mode="startup"):
+    hs = triage.health_status(results, PKG, mode, capture)
+    return hs, triage.analyse(results, PKG, mode, hs)
+
+
+@case
+def a_trace_that_does_not_say_its_android_version_takes_it_from_capture_sh():
+    """A real Android 10 trace carried neither the SDK level nor a fingerprint.
+    The phone then looked like a capture that forgot the frame timeline, and
+    the fix plan said to redo a capture that could never come out differently."""
+    silent = old_phone(sdk="[NULL]", fingerprint="")
+    hs, f = run_with(silent, {"sdk": "29", "compile_status": "speed-profile"})
+    assert (hs["device"]["sdk"], hs["device"]["android"], hs["device"]["source"]) == \
+        (29, "10", "capture.sh"), hs
+    assert hs["frames"] == "unsupported" and hs["compile_status"] == "speed-profile", hs
+    assert not any(x["kind"] == "no_frametimeline" for x in f), f
+    hs, f = run(silent, mode="interactive")
+    gap = [x for x in f if x["kind"] == "no_frametimeline"][0]
+    assert "pass --sdk" in gap["detail"], "say how to tell triage, instead of only 're-record'"
+
+
+@case
+def the_package_list_is_the_last_way_to_read_the_android_version():
+    r = base() | {"01_coverage": (OLD_COV_H + ["framework_version"], [
+        ["1000", "500", "0", "40", "30", "800", "12000", "[NULL]", "[NULL]", "29"]])}
+    hs, _ = run(r)
+    assert (hs["device"]["sdk"], hs["device"]["source"]) == (29, "package list"), hs
+    r["01_coverage"][1][0][-1] = "330000000"       # a version code that is not an SDK level
+    hs, _ = run(r)
+    assert hs["device"]["sdk"] is None, hs
+
+
+@case
+def the_flush_note_is_not_raised_on_a_phone_where_nothing_can_be_done_about_it():
+    r = old_phone() | {"00_health": (["name", "value"], [["config_write_into_file_no_flush", "1"]])}
+    hs, f = run(r)
+    assert hs["trace_health"] == "pass" and not any(x["kind"] == "no_flush_period" for x in f), f
+
+
+@case
+def heavy_jit_is_read_against_how_the_install_was_compiled():
+    def jit(capture):
+        r = base(cov=["1000", "500", "90", "40", "30", "800", "10000"])
+        r["40_slice_hotspots"] = (["name", "thread_name", "n", "total_ms", "self_ms"],
+                                  [["Compiling", "Jit thread pool", "600", "2600", "2600"]])
+        return [x for x in run_with(r, capture)[1] if x["kind"] == "jit_compile"][0]
+    stale = jit({"compile_status": "speed-profile"})
+    assert "does not cover the code that ran" in stale["detail"], stale
+    assert "Regenerate the Baseline Profile" in stale["action"]
+    assert "installed with adb" not in stale["detail"], "it is compiled: do not say it is not"
+    raw = jit({"compile_status": "verify"})
+    assert "not a compiled profile" in raw["detail"] and "compile -f -m speed-profile" in raw["action"]
+    unknown = jit(None)
+    assert "cannot tell which" in unknown["detail"]
+
+
+@case
+def drawing_for_seconds_after_a_cold_start_with_no_input_is_a_finding():
+    def frames(n, ticks, mode="startup"):
+        r = base()
+        r["20_jank_summary"] = (["process_name", "frames", "janky", "janky_pct", "app_jank",
+                                 "sf_jank", "worst_overrun_ms"],
+                                [[PKG, str(n), "0", "0", "0", "0", "0"]])
+        r["40_slice_hotspots"] = (["name", "thread_name", "n", "total_ms", "self_ms"],
+                                  [["Recomposer:animation", "main", str(ticks), "300", "300"]])
+        return [x for x in run(r, mode=mode)[1] if x["kind"] == "always_animating"]
+    hit = frames(478, 477)
+    assert hit and hit[0]["severity"] == "medium", hit
+    assert "477 of them" in hit[0]["detail"] and "Compose animation is driving it" in hit[0]["detail"]
+    assert not frames(120, 118), "a splash animation is not a leak"
+    assert frames(400, 0) and "keeps invalidating a view" in frames(400, 0)[0]["detail"]
+    assert not frames(478, 477, mode="interactive"), "somebody is touching the screen there"
+
+
+@case
+def unnamed_binder_calls_say_when_the_android_version_is_why():
+    r = old_phone()
+    r["30_binder_main_thread"] = (["client_process", "aidl_name", "server_process", "n", "total_ms", "max_ms"],
+                                  [[PKG, "unknown", "system_server", "318", "79", "5.6"]])
+    _, f = run(r)
+    assert "Android 10 does not write interface names" in \
+        [x for x in f if x["kind"] == "main_binder"][0]["detail"]
 
 
 @case

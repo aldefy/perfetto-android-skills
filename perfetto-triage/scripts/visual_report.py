@@ -846,6 +846,10 @@ def q3_frames(out_dir: str, pkg: str, hs: dict | None) -> str:
             why = ("The trace has no frame timeline, so there is no deadline to compare "
                    "each frame against. Record again with capture.sh, whose config turns "
                    "the frame timeline on.")
+            if not (hs.get("device") or {}).get("sdk"):
+                why += (" The trace does not say which Android version the phone runs. "
+                        "Below Android 12 there is no frame timeline to record: if that "
+                        "is this phone, pass --sdk to triage and nothing needs redoing.")
             sub = "no frame timeline in this trace"
         return (tiles([("frames drawn", f"{frames:.0f}", proc or ""),
                        ("late frames", "not measured", sub)])
@@ -978,12 +982,18 @@ def q4_time(out_dir: str, pkg: str, hs: dict | None, cm: dict | None = None) -> 
         ]))
         br = [(r.get("reason", ""), num(r.get("ms")), f"{r.get('n', '')} slices")
               for r in read_csv(out_dir, "11_startup_breakdown")][:10]
-        parts.append(figure("What startup was spent on",
-                            "Perfetto's own breakdown of the launch, largest first. "
-                            "Categories overlap, so they do not add up to the total.",
-                            bar_chart(br, "Startup time by reason"), "",
-                            "Find the Android App Startups track near the top of the trace. "
-                            "Selecting the startup slice highlights this window."))
+        if br:
+            parts.append(figure("What startup was spent on",
+                                "Perfetto's own breakdown of the launch, largest first. "
+                                "Categories overlap, so they do not add up to the total.",
+                                bar_chart(br, "Startup time by reason"), "",
+                                "Find the Android App Startups track near the top of the trace. "
+                                "Selecting the startup slice highlights this window."))
+        else:
+            parts.append('<p class="empty">Perfetto\'s startup breakdown by cause is not '
+                         'available for this trace. Its standard library could not tie the '
+                         'launch to the app\'s process, which happens on older Android. The '
+                         'slices below cover the same ground.</p>')
         top = [(r.get("slice_name", ""), num(r.get("total_ms")), f"{r.get('n', '')}x",
                 badge(r.get("slice_name", "")))
                for r in read_csv(out_dir, "13_startup_top_slices")][:8]
@@ -1038,8 +1048,11 @@ def q4_time(out_dir: str, pkg: str, hs: dict | None, cm: dict | None = None) -> 
                  f"{r.get('n', '')}x to {r.get('server_process', '')}") for r in binder]
         how = "Each bar is one binder interface the main thread called and waited on."
         if unnamed:
-            how += (" This trace does not name the interfaces, so those calls are grouped "
-                    "by the process that was called.")
+            sdk = ((hs or {}).get("device") or {}).get("sdk")
+            rel = ((hs or {}).get("device") or {}).get("android")
+            how += ((f" Android {rel} does not write interface names into a trace"
+                     if sdk and sdk < 31 else " This trace does not name the interfaces")
+                    + ", so those calls are grouped by the process that was called.")
         parts.append(figure("Synchronous calls to other processes", how,
                             bar_chart(rows, "Main thread binder calls")))
         agg: dict[str, float] = {}

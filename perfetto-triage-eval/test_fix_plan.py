@@ -187,6 +187,34 @@ def test_heavy_jit_suggests_compiling_the_build_before_measuring():
     assert any("speed-profile" in c for c in item["change"])
 
 
+def test_missing_frame_timeline_on_a_cold_start_does_not_stop_the_plan():
+    plan = fp.build([finding("no_frametimeline", "info"), finding("main_binder", "medium")],
+                    {"verdict": "trusted"})
+    assert kinds(plan, "first") == [] and kinds(plan, "next") == ["main_binder"], plan["items"]
+    assert "Fix the capture first" not in plan["summary"]
+    assert not any(i.get("blocked_by_capture") for i in plan["items"])
+    stop = fp.build([finding("no_frametimeline", "blocker"), finding("main_binder", "medium")],
+                    {"verdict": "trusted"})
+    assert kinds(stop, "first") == ["no_frametimeline"] and "Fix the capture first" in stop["summary"]
+
+
+def test_always_on_animation_has_a_plan_and_checks_the_frame_count():
+    plan = fp.build([finding("always_animating")], {"verdict": "trusted"})
+    assert plan["items"][0]["priority"] == "next" and plan["items"][0]["check"] == ["frames"]
+
+
+def test_report_is_not_opened_where_it_was_asked_not_to_be():
+    old = os.environ.get("PERFETTO_TRIAGE_NO_OPEN")
+    os.environ["PERFETTO_TRIAGE_NO_OPEN"] = "1"
+    try:
+        assert triage.open_report("/tmp/report.html") is False
+    finally:
+        if old is None:
+            del os.environ["PERFETTO_TRIAGE_NO_OPEN"]
+        else:
+            os.environ["PERFETTO_TRIAGE_NO_OPEN"] = old
+
+
 CASES = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
 
 

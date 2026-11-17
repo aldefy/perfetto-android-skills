@@ -353,6 +353,135 @@ def test_audit_survives_a_missing_repo():
     assert a["path"]["files"] == [] and isinstance(a["summary"], str)
 
 
+# ---- what two real runs got wrong ----------------------------------------
+
+KMP = {
+    "composeApp/src/androidMain/AndroidManifest.xml": FILES["app/src/main/AndroidManifest.xml"]
+    .replace(".ShopApp", ".AndroidApp").replace(".MainActivity", ".AppActivity"),
+    "composeApp/src/androidMain/kotlin/com/example/shop/App.android.kt": """package com.example.shop
+
+class AndroidApp : Application() {
+    override fun onCreate() {
+        super.onCreate()
+        if (BuildConfig.DEBUG) DebugLog.init(filesDir)
+        Sentry.init(this)
+    }
+}
+
+class AppActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContent { App() }
+    }
+}
+""",
+    "composeApp/src/commonMain/kotlin/com/example/shop/App.kt": """package com.example.shop
+
+@Composable
+fun App() {
+    AppNavigation()
+}
+""",
+    "composeApp/src/commonMain/kotlin/com/example/shop/AppNavigation.kt": """package com.example.shop
+
+@Composable
+fun AppNavigation() {
+    if (loading) CircularProgressIndicator()
+    LinearProgressIndicator(progress = { done })
+}
+""",
+    "composeApp/src/commonMain/kotlin/com/example/shop/AppViewModel.kt":
+        "package com.example.shop\nclass AppViewModel\n",
+    "composeApp/src/commonMain/kotlin/com/example/shop/setup/GuidedSetupScreen.kt":
+        "package com.example.shop.setup\n@Composable\nfun GuidedSetupScreen() {}\n",
+    "composeApp/src/commonMain/kotlin/com/example/shop/setup/PairingDeviceScreen.kt":
+        "package com.example.shop.setup\n@Composable\nfun PairingDeviceScreen() {}\n",
+    "composeApp/src/commonMain/kotlin/com/example/shop/maps/MapStage.kt":
+        "package com.example.shop.maps\n@Composable\nfun MapStage() { rememberInfiniteTransition() }\n",
+    "composeApp/src/androidDebug/kotlin/com/example/shop/DebugMenu.kt":
+        "package com.example.shop\nfun debugMenu() { Thread.sleep(50); App() }\n",
+}
+
+
+def kmp(extra=None):
+    root = tempfile.mkdtemp(prefix="audit-kmp-")
+    for rel, text in dict(KMP, **(extra or {})).items():
+        path = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            fh.write(text)
+    return root
+
+
+def test_entry_points_are_found_where_the_class_is_defined_not_by_file_name():
+    """A Kotlin Multiplatform app kept its Application and Activity classes
+    together in App.android.kt. Looking for AppActivity.kt found nothing."""
+    a = run(root=kmp())
+    roles = {os.path.basename(f["file"]): f["role"] for f in a["path"]["files"]}
+    assert roles["App.android.kt"] == "Application class, launcher Activity", roles
+    assert "App.kt" in roles and "AppNavigation.kt" in roles, "and the path is followed from there"
+    assert any("Entry points from AndroidManifest.xml" in h for h in a["path"]["how"])
+
+
+def test_debug_source_sets_are_not_read_and_debug_guarded_lines_are_marked():
+    a = run(root=kmp())
+    assert "DebugMenu.kt" not in [os.path.basename(f["file"]) for f in a["path"]["files"]]
+    hits = checks(a, "sdk_init_on_start")
+    assert [h["line"] for h in hits] == [7, 6], "the line that ships comes before the debug-only one"
+    assert hits[1]["debug_only"] and "debug check" in hits[1]["note"]
+    assert "note" not in hits[0]
+
+
+def test_an_exact_screen_name_wins_over_names_that_only_contain_it():
+    """--flow App matched 13 files: everything with App in its name."""
+    index = cm.scan_repo(kmp())
+    names = sorted(os.path.basename(f) for f in ca.match_name(index, "app"))
+    assert names == ["App.android.kt", "App.kt", "AppViewModel.kt"], \
+        f"App, and App plus a screen suffix, but not AppNavigation: {names}"
+    assert [os.path.basename(f) for f in ca.match_name(index, "appnav")] == ["AppNavigation.kt"]
+    assert [os.path.basename(f) for f in ca.match_name(index, "stage")] == ["MapStage.kt"]
+
+
+def test_a_described_flow_is_split_into_the_screens_it_names():
+    """Free text matched only its first words."""
+    index = cm.scan_repo(kmp())
+    hits, missed = ca.match_flow(index, "then guided setup to Pairing Device")
+    assert sorted(os.path.basename(f) for f, _ in hits) == [
+        "GuidedSetupScreen.kt", "PairingDeviceScreen.kt"], hits
+    assert missed == []
+    hits, missed = ca.match_flow(index, "open the Wishlist then Map Stage")
+    assert [os.path.basename(f) for f, _ in hits] == ["MapStage.kt"] and missed == ["Wishlist"]
+    assert ca.match_flow(index, "Wishlist") == ([], ["Wishlist"])
+
+
+def test_code_the_trace_names_joins_the_path():
+    """Screens that ran were not audited, because nothing on the path referred
+    to them. A slice that names an app class is direct evidence it ran."""
+    names = ["performCreate:com.example.shop.AppActivity",
+             "com.example.shop.maps.MapStage (MapStage.kt:3)",
+             "Lcom/other/lib/Thing;", "Choreographer#doFrame"]
+    index = cm.scan_repo(kmp())
+    a = ca.audit(index, [finding("always_animating")], "interactive", None, None, [], "", names)
+    roles = {os.path.basename(f["file"]): f["role"] for f in a["path"]["files"]}
+    assert roles["MapStage.kt"] == "named in the trace", roles
+    assert "named in the trace" in roles["App.android.kt"]
+    assert not any("--flow" in h for h in a["path"]["how"]), "the trace already said what ran"
+    hit = checks(a, "endless_animation")
+    assert [base(h) for h in hit] == ["MapStage.kt"] and hit[0]["on_path"] == "named in the trace"
+    quiet = ca.audit(index, [finding("always_animating")], "interactive", None, None, [], "", [])
+    assert any("does not say which screens ran" in h for h in quiet["path"]["how"])
+
+
+def test_indeterminate_progress_is_a_candidate_and_a_determinate_one_is_not():
+    a = run(findings=[finding("always_animating")], root=kmp())
+    hits = checks(a, "redraws_while_shown")
+    assert [(base(h), h["line"]) for h in hits] == [("AppNavigation.kt", 5)], hits
+    plan = fp.build([finding("always_animating")], {"verdict": "trusted"}, None, None, a)
+    cands = plan["items"][0]["candidates"]
+    assert cands[0]["file"].endswith("AppNavigation.kt"), "code on the path comes first"
+    assert "not known to be on the path" in cands[-1]["on_path"]
+
+
 # ---- into the fix plan and the reports -----------------------------------
 
 def test_fix_plan_carries_candidates_under_the_matching_suggestion():

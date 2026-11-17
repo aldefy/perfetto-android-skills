@@ -83,8 +83,12 @@ def scan_repo(repo: str) -> dict:
     for path in _walk(repo):
         rel = os.path.relpath(path, repo)
         stem = os.path.splitext(os.path.basename(path))[0]
-        index["files"].setdefault(stem, rel)
-        index["all_files"].setdefault(stem, []).append(rel)
+        # Kotlin Multiplatform names a platform's half of a file App.android.kt.
+        # It is found under both names: App.android and App.
+        for key in dict.fromkeys((stem, stem.split(".")[0])):
+            if key:
+                index["files"].setdefault(key, rel)
+                index["all_files"].setdefault(key, []).append(rel)
         index["scanned"] += 1
         try:
             if os.path.getsize(path) > MAX_BYTES:
@@ -142,6 +146,50 @@ def section_match_sql(index: dict, column: str = "s.name", limit: int = 400) -> 
     if literals:
         clauses.append(f"{column} IN ({', '.join(_sql_str(x) for x in literals)})")
     clauses.extend(f"{column} GLOB {_sql_str(g)}" for g in globs)
+    return " OR ".join(clauses) if clauses else None
+
+
+NOT_APP_ROOTS = ("android", "androidx", "kotlin", "kotlinx", "java", "javax", "dalvik",
+                 "com.google", "com.android", "org.jetbrains", "io.ktor", "okhttp3", "retrofit2")
+
+
+def code_packages(index: dict, limit: int = 4) -> list[str]:
+    """The package roots the app's own source is written in, most used first:
+    com.example.shop. Read from the package line of each Kotlin or Java file."""
+    counts: dict[str, int] = {}
+    total = 0
+    for rels in index.get("all_files", {}).values():
+        for rel in rels:
+            if not rel.endswith((".kt", ".java")):
+                continue
+            package = _package_of(index, rel)
+            parts = package.split(".") if package else []
+            if len(parts) < 2:
+                continue
+            root = ".".join(parts[:3])
+            if root.startswith(NOT_APP_ROOTS):
+                # an app that lives under a vendor's namespace needs a longer
+                # root, or the filter would match that vendor's libraries too
+                if len(parts) < 5:
+                    continue
+                root = ".".join(parts[:5])
+            counts[root] = counts.get(root, 0) + 1
+            total += 1
+    floor = max(2, total // 20)
+    return [r for r, n in sorted(counts.items(), key=lambda kv: -kv[1]) if n >= floor][:limit]
+
+
+def name_match_sql(index: dict, column: str = "s.name") -> str | None:
+    """A SQL condition that is true for slices that name the app's own code:
+    a class under one of its packages (in either the dotted or the slashed
+    spelling a trace uses), or one of its trace sections."""
+    clauses = []
+    for root in code_packages(index):
+        for spelled in (root, root.replace(".", "/")):
+            clauses.append(f"{column} GLOB {_sql_str('*' + _glob_escape(spelled) + '*')}")
+    sections = section_match_sql(index, column)
+    if sections:
+        clauses.append(sections)
     return " OR ".join(clauses) if clauses else None
 
 
@@ -203,6 +251,21 @@ def _package_of(index: dict, rel: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _files_in_package(index: dict, package: str) -> list[str]:
+    """Kotlin and Java files whose package line is exactly this package."""
+    by_package = index.get("_by_package")
+    if by_package is None:
+        by_package = {}
+        for rels in index.get("all_files", {}).values():
+            for rel in rels:
+                if rel.endswith((".kt", ".java")):
+                    found = _package_of(index, rel)
+                    if found and rel not in by_package.setdefault(found, []):
+                        by_package[found].append(rel)
+        index["_by_package"] = by_package
+    return by_package.get(package, [])
+
+
 def _defines(index: dict, stem: str, method: str) -> str | None:
     """'path:line' where the class file defines the method, else None."""
     rel = index["files"].get(stem)
@@ -248,6 +311,12 @@ def classify(name: str, index: dict, pkg: str = "") -> dict:
         package, cls = m.group(1).rstrip("."), m.group(2)
         for rel in index.get("all_files", {}).get(cls, []):
             if _package_of(index, rel) == package:
+                return {"owner": "app", "how": "app class", "evidence": rel}
+        # Kotlin lets one file hold several classes, so the class may live in a
+        # file of another name: AppActivity inside App.android.kt.
+        for rel in _files_in_package(index, package):
+            if re.search(r"\b(?:class|object|interface)\s+" + re.escape(cls) + r"\b",
+                         _text(index, rel)):
                 return {"owner": "app", "how": "app class", "evidence": rel}
     return {"owner": "other", "how": "not in your source", "evidence": None}
 

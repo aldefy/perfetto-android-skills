@@ -12,7 +12,8 @@ Outputs into --out (default ./triage-out):
   findings.json  machine-readable verdicts plus a health_status block, for an
                  agent to act on
   report.html    the same findings as a page for a person: charts in the
-                 Perfetto UI's colours, each with a plain explanation
+                 Perfetto UI's colours, each with a plain explanation. It
+                 opens in the browser when triage starts (--no-open to stop that)
   fix_plan.md    suggested fixes in order, for an agent to review before it
                  changes anything (also `fix_plan` in findings.json)
   code_audit.md  with --app-repo: the code that ran during the capture, read
@@ -345,21 +346,76 @@ ANDROID_RELEASE = {24: "7.0", 25: "7.1", 26: "8.0", 27: "8.1", 28: "9", 29: "10"
 FRAME_TIMELINE_SDK = 31     # Android 12: the first release that records frame deadlines
 
 
-def device_info(cov_row: dict | None) -> dict:
-    """{'sdk': int|None, 'android': '10'|None} from 01_coverage. The SDK level
-    comes from the trace's own metadata, or failing that from the release field
-    of the build fingerprint (brand/product/device:RELEASE/ID/...)."""
+def open_report(path: str) -> bool:
+    """Show report.html in the person's browser. Best effort: never raises,
+    and does nothing where there is no screen to show it on (a server, CI, a
+    container), or when PERFETTO_TRIAGE_NO_OPEN is set."""
+    if os.environ.get("PERFETTO_TRIAGE_NO_OPEN") or os.environ.get("CI"):
+        return False
+    try:
+        path = os.path.abspath(path)
+        if sys.platform == "darwin":
+            cmd = ["open", path]
+        elif os.name == "nt":
+            os.startfile(path)      # noqa: only exists on Windows
+            return True
+        elif (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")) and shutil.which("xdg-open"):
+            cmd = ["xdg-open", path]
+        else:
+            return False
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except Exception:
+        return False
+
+
+def read_capture_info(trace_path: str) -> dict:
+    """What capture.sh wrote beside the trace: the phone's SDK level, how the
+    app was compiled, and so on. {} when there is no such file."""
+    info = {}
+    path = os.path.splitext(trace_path or "")[0] + ".capture.txt"
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for line in fh.read(4000).splitlines():
+                key, sep, value = line.partition("=")
+                if sep and re.fullmatch(r"[a-z_]{1,30}", key.strip()):
+                    info[key.strip()] = value.strip()[:120]
+    except OSError:
+        pass
+    return info
+
+
+def device_info(cov_row: dict | None, capture: dict | None = None) -> dict:
+    """{'sdk': int|None, 'android': '10'|None, 'source': str|None}.
+
+    The SDK level is taken from the first of these that has it:
+      the trace's metadata         android_sdk_version
+      capture.sh's note            the .capture.txt beside the trace, or --sdk
+      the build fingerprint        brand/product/device:RELEASE/ID/...
+      the package list             the "android" package's version code
+    Android 10 traces have neither metadata field, which is why the last three
+    exist: without them an old phone looks like a capture that forgot the frame
+    timeline."""
     row = cov_row or {}
-    sdk = num(row.get("android_sdk"))
-    sdk = int(sdk) if sdk else None
-    release = ANDROID_RELEASE.get(sdk) if sdk else None
+
+    def level(v):
+        n = num(v)
+        return int(n) if n and 14 <= n <= 99 else None
+    sdk, source, release = level(row.get("android_sdk")), "trace metadata", None
+    if sdk is None:
+        sdk, source = level((capture or {}).get("sdk")), "capture.sh"
     if sdk is None:
         m = re.search(r":([0-9]+(?:\.[0-9]+)?)(?:\.[0-9]+)*/", str(row.get("build_fingerprint") or ""))
         if m:
-            release = m.group(1)
+            release, source = m.group(1), "build fingerprint"
             sdk = next((k for k, v in ANDROID_RELEASE.items()
                         if v == release or v == release.split(".")[0]), None)
-    return {"sdk": sdk, "android": release}
+    if sdk is None and release is None:
+        sdk, source = level(row.get("framework_version")), "package list"
+    if sdk is None and release is None:
+        source = None
+    return {"sdk": sdk, "android": release or (ANDROID_RELEASE.get(sdk, f"API {sdk}") if sdk else None),
+            "source": source}
 
 
 def infer_mode(trace_path: str) -> str:
@@ -373,7 +429,8 @@ def infer_mode(trace_path: str) -> str:
     return "unknown"
 
 
-def health_status(results: dict, pkg: str, mode: str = "unknown") -> dict:
+def health_status(results: dict, pkg: str, mode: str = "unknown",
+                  capture: dict | None = None) -> dict:
     """Explicit pass/fail for the trust checks, so a reader never has to infer
     'healthy' from the absence of a finding.
 
@@ -424,7 +481,14 @@ def health_status(results: dict, pkg: str, mode: str = "unknown") -> dict:
         reasons.append("01_coverage did not run")
     # Gaps scope what the trace can answer. Only sched/slices decide the verdict.
     hs["coverage_gaps"] = [k for k, v in hs["coverage"].items() if v == "missing"]
-    hs["device"] = device_info(cov[0] if cov else None)
+    hs["device"] = device_info(cov[0] if cov else None, capture)
+    status = (capture or {}).get("compile_status")
+    hs["compile_status"] = status if status and status != "unknown" else None
+    # The stdlib's startup breakdown needs to tie the launch to its process,
+    # which it cannot do on older Android. Say so instead of showing nothing.
+    if "11_startup_breakdown" in results and "10_startup_summary" in results:
+        hs["startup_breakdown"] = ("ok" if table("11_startup_breakdown")
+                                   else "unavailable" if table("10_startup_summary") else "no_launch")
     sdk = hs["device"]["sdk"]
     ft = hs["coverage"].get("frametimeline", "unknown")
     hs["frames"] = ("measured" if ft == "ok" else "unknown" if ft == "unknown"
@@ -496,6 +560,7 @@ KINDS = [
     (r"^Late frames cannot be measured", "frames_unsupported"),
     (r"^Trace was written without a flush period", "no_flush_period"),
     (r"^The JIT compiler ran for", "jit_compile"),
+    (r"frames after launch with no input", "always_animating"),
     (r"^No kernel blocking reasons", "no_blocked_reasons"),
     (r"^No scheduler data", "no_sched"),
     (r"^Startup capture missed", "startup_missed"),
@@ -557,7 +622,9 @@ def analyse(results: dict, pkg: str, mode: str = "unknown",
             f"trace_processor stats reported: {names}",
             "Re-record with a bigger buffer (-b 256mb) or a shorter duration. "
             "Numbers from a lossy trace are not comparable across runs.")
-    if any(r.get("name") == "config_write_into_file_no_flush" for r in health):
+    device = hs.get("device") or {}
+    old_phone = bool(device.get("sdk")) and device["sdk"] < FRAME_TIMELINE_SDK
+    if any(r.get("name") == "config_write_into_file_no_flush" for r in health) and not old_phone:
         add("info", "trace", "Trace was written without a flush period",
             BENIGN_STATS["config_write_into_file_no_flush"] + " The numbers in this "
             "report are not affected.",
@@ -586,7 +653,7 @@ def analyse(results: dict, pkg: str, mode: str = "unknown",
     if cov:
         c = cov[0]
         if (num(c.get("frametimeline_rows")) or 0) == 0 and hs.get("frames") == "unsupported":
-            rel = hs["device"].get("android") or f"API {hs['device'].get('sdk')}"
+            rel = device.get("android") or f"API {device.get('sdk')}"
             add("info" if mode == "startup" else "medium", "jank",
                 f"Late frames cannot be measured on this phone (Android {rel})",
                 "The frame timeline, which records each frame's deadline and who missed "
@@ -597,8 +664,16 @@ def analyse(results: dict, pkg: str, mode: str = "unknown",
                 "state, binder and slice numbers from this trace are not affected."
                 + ("" if mode == "startup" else " Do not report a jank result from this capture."))
         elif (num(c.get("frametimeline_rows")) or 0) == 0:
-            add("blocker", "jank", "No FrameTimeline data in this trace",
-                "actual_frame_timeline_slice is empty, so no jank attribution is possible.",
+            unknown_phone = not device.get("sdk")
+            add("info" if mode == "startup" else "blocker", "jank",
+                "No FrameTimeline data in this trace",
+                "actual_frame_timeline_slice is empty, so no jank attribution is possible."
+                + (" The trace does not say which Android version the phone runs. Below "
+                   "Android 12 there is no frame timeline to record, and this is not a "
+                   "capture mistake: pass --sdk <level> to triage, or capture with "
+                   "capture.sh, which notes it beside the trace." if unknown_phone else "")
+                + (" This is a cold-start capture, so the startup numbers do not depend on it."
+                   if mode == "startup" else ""),
                 "Re-record with the android.surfaceflinger.frametimeline data source "
                 "(requires a full TraceConfig and Android 12+). The lightweight "
                 "`adb shell perfetto <atrace categories>` form cannot enable it.")
@@ -864,9 +939,11 @@ def analyse(results: dict, pkg: str, mode: str = "unknown",
                 f"{worst.get('n')} synchronous calls from {worst.get('client_process')} "
                 f"to {worst.get('server_process')}, worst single call "
                 f"{num(worst.get('max_ms')) or 0:.1f} ms."
-                + ("" if named else " This trace does not name the interface, so the "
-                   "server process is the only lead: search the code on this path for "
-                   "the framework APIs that process serves."),
+                + ("" if named else
+                   (f" Android {device.get('android')} does not write interface "
+                    "names into a trace" if old_phone else " This trace does not name the interface")
+                   + ", so the process that was called is the only lead: search the code "
+                     "on this path for the framework APIs that process serves."),
                 "Synchronous binder on the main thread is a frozen UI. Cache the result, "
                 "batch the calls, or move them to a background dispatcher. System APIs that "
                 "look local (PackageManager, ConnectivityManager, DisplayManager, "
@@ -905,17 +982,66 @@ def analyse(results: dict, pkg: str, mode: str = "unknown",
     jit = sum(num(r.get("total_ms")) or 0 for r in table("40_slice_hotspots")
               if r.get("name") == "Compiling" and str(r.get("thread_name", "")).startswith("Jit thread"))
     if jit >= 500 and span and jit >= 0.10 * span:
+        compiled = hs.get("compile_status") or ""
+        base = ("That is the time in 'Compiling' slices on the app's JIT thread. Code that "
+                "was compiled ahead of time does not need the JIT. ")
+        if "speed-profile" in compiled or compiled in ("speed", "everything"):
+            detail = (base + f"capture.sh read the install as {compiled}, so a profile is "
+                      "compiled. The JIT was still this busy, which means the profile does "
+                      "not cover the code that ran: it is stale, or it was recorded over a "
+                      "different path.")
+            action = ("Regenerate the Baseline Profile over the path that was captured "
+                      "(startup, and the first screens), ship it, and compile it on the test "
+                      "install: adb shell cmd package compile -f -m speed-profile <pkg>. "
+                      "Then capture again and compare JIT compile (ms).")
+        elif compiled:
+            detail = (base + f"capture.sh read the install as {compiled}, which is not a "
+                      "compiled profile. Every number in this report was taken on code that "
+                      "is interpreted and compiled on the fly, which is slower than what a "
+                      "store install runs.")
+            action = ("Compile it before measuring: adb shell cmd package compile -f -m "
+                      "speed-profile <pkg>. That only helps when the APK carries a Baseline "
+                      "Profile, so add one if the app has none. Then capture again.")
+        else:
+            detail = (base + "So either the install under test has no compiled profile, "
+                      "which is common for a build installed with adb, or it has one that "
+                      "does not cover the code that ran. This trace cannot tell which.")
+            action = ("See how the app is compiled: adb shell dumpsys package dexopt | grep -A2 "
+                      "<pkg>. Not speed-profile: compile it with adb shell cmd package compile "
+                      "-f -m speed-profile <pkg>, which needs a Baseline Profile in the APK. "
+                      "Already speed-profile: the profile is stale or misses this path, so "
+                      "regenerate it. Then capture again.")
         add("medium", "runtime",
             f"The JIT compiler ran for {jit:,.0f} ms, {100 * jit / span:.0f}% of the capture",
-            "That is the time in 'Compiling' slices on the app's JIT thread. Code that "
-            "was compiled ahead of time does not need the JIT, so this much of it "
-            "usually means the install under test has no compiled profile. A build "
-            "installed with adb is not compiled the way a store install is.",
-            "Check how the app is compiled: adb shell dumpsys package dexopt | grep -A2 <pkg>. "
-            "If it does not say speed-profile, compile it before measuring: adb shell cmd "
-            "package compile -f -m speed-profile <pkg>. That only helps when the APK "
-            "carries a Baseline Profile, so add one if the app has none. Then capture "
-            "again: every number in this report was taken on uncompiled code.")
+            detail, action)
+
+    # --- 3c. Drawing with nobody touching the screen ------------------------
+    # capture.sh launches the app for a cold start and then leaves it alone. An
+    # idle screen draws nothing, so hundreds of frames in that window mean
+    # something keeps animating. Compose's frame clock shows as
+    # Recomposer:animation, once per frame an animation asked for.
+    if mode == "startup":
+        drawn = next((num(r.get("frames")) or 0 for r in table("20_jank_summary")
+                      if pkg in ("*", "") or _glob(r.get("process_name", ""), pkg)), 0)
+        ticks = sum(num(r.get("n")) or 0 for r in table("40_slice_hotspots")
+                    if r.get("name") == "Recomposer:animation")
+        compose = drawn and ticks >= 0.8 * drawn
+        if drawn >= 300 or (drawn >= 180 and compose):
+            src[:] = ["20_jank_summary", "40_slice_hotspots"]
+            add("medium", "jank",
+                f"The app drew {drawn:.0f} frames after launch with no input",
+                "A cold-start capture launches the app and then leaves it alone. A screen "
+                "that has finished loading draws nothing, so this many frames means "
+                "something keeps animating"
+                + (f". Compose's frame clock ran in {ticks:.0f} of them "
+                   "(Recomposer:animation), so a Compose animation is driving it."
+                   if compose else ", or keeps invalidating a view.")
+                + " If somebody did touch the screen during the capture, ignore this.",
+                "Find what never stops: an infinite transition, a progress indicator or "
+                "shimmer still in the composition after loading, a marquee, a frame loop "
+                "(withFrameNanos), a looping Lottie or animated image. It costs battery "
+                "for as long as the screen is open and leaves less room for real work in "
+                "every frame. Composition tracing names the composable.")
 
     # --- 4. ANR -----------------------------------------------------------
     anrs = table("41_anrs")
@@ -1101,11 +1227,19 @@ def main():
                     help="with --app-repo: the screens that were driven during the capture, "
                          "comma-separated (Home,TripDetail). Their source files join the "
                          "code that is audited for causes. Not needed for a cold start.")
+    ap.add_argument("--sdk", type=int, default=None,
+                    help="the phone's Android SDK level (29 for Android 10). Only needed "
+                         "when the trace does not say and it was not captured with "
+                         "capture.sh, which notes it beside the trace.")
     ap.add_argument("--query-timeout", type=float, default=600,
                     help="seconds one query may run before it is abandoned and "
                          "reported as not finished (default 600)")
     ap.add_argument("--no-html", action="store_true",
                     help="skip report.html (the visual report)")
+    ap.add_argument("--no-open", action="store_true",
+                    help="do not open report.html in the browser. By default it opens "
+                         "as soon as triage starts, as a status page that turns into "
+                         "the report. Use this when triaging many traces in a row.")
     args = ap.parse_args()
     mode = infer_mode(args.trace) if args.mode == "auto" else args.mode
 
@@ -1117,6 +1251,8 @@ def main():
     global STATUS
     STATUS = Status(args.out, args.trace, html=not args.no_html)
     log(f"starting. Live status: {os.path.join(args.out, 'report.html') if not args.no_html else os.path.join(args.out, 'progress.txt')}")
+    if not args.no_html and not args.no_open and open_report(os.path.join(args.out, "report.html")):
+        log("opened report.html in the browser. It reloads itself until the report is ready.")
     tmpdir = os.path.join(args.out, ".sql")
     os.makedirs(tmpdir, exist_ok=True)
 
@@ -1125,7 +1261,10 @@ def main():
         wanted = [w.strip() for w in args.only.split(",")]
         stems = [s for s in stems if any(s.startswith(w) for w in wanted)]
 
-    cmod, index, section_sql = None, None, None
+    capture = read_capture_info(args.trace)
+    if args.sdk:
+        capture["sdk"] = str(args.sdk)
+    cmod, index, section_sql, name_sql = None, None, None, None
     if args.app_repo:
         try:  # everything --app-repo adds is a convenience and must never fail a triage
             import importlib.util
@@ -1136,6 +1275,7 @@ def main():
             log("reading the app's source for trace sections")
             index = cmod.scan_repo(args.app_repo)
             section_sql = cmod.section_match_sql(index)
+            name_sql = cmod.name_match_sql(index)
             log(f"{index['scanned']} source files, {len(index['sections'])} trace sections declared")
         except Exception as exc:
             log(f"code map skipped: {exc}")
@@ -1177,8 +1317,15 @@ def main():
             run_query(f"[app sections] {stem}", stem,
                       sql.replace("__PKG__", args.pkg).replace("__SECTION_MATCH__", section_sql))
 
+        if name_sql and not args.only:
+            # every app class, file and section the trace names: which code ran
+            stem = "25_app_code_in_trace"
+            sql = open(os.path.join(QUERY_DIR, "on_demand", stem + ".sql")).read()
+            run_query(f"[app code] {stem}", stem,
+                      sql.replace("__PKG__", args.pkg).replace("__NAME_MATCH__", name_sql))
+
     log("queries done, working out the findings")
-    status = health_status(results, args.pkg, mode)
+    status = health_status(results, args.pkg, mode, capture)
     findings = analyse(results, args.pkg, mode, status)
     findings = unfinished_findings(errors) + findings
 
@@ -1213,7 +1360,9 @@ def main():
                        if (num(r.get("total_ms")) or 0) >= 5
                        and (args.pkg in ("*", "") or _glob(r.get("client_process", ""), args.pkg))]
             flow = [x.strip() for x in args.flow.split(",") if x.strip()]
-            audit = amod.audit(index, findings, mode, flow, code_map, servers, args.pkg)
+            seen = [r.get("name", "") for r in
+                    as_dicts(*results.get("25_app_code_in_trace", ([], [])))]
+            audit = amod.audit(index, findings, mode, flow, code_map, servers, args.pkg, seen)
             audit_md = amod.to_markdown(audit)
             log(audit["summary"])
         except Exception as exc:
@@ -1308,6 +1457,16 @@ def main():
                 if not r and stem in STARTUP_STEMS and status["startup_capture"] == "not_expected":
                     out.append("_Not applicable: this is an interactive capture, so no "
                                "app launch is expected in it._\n")
+                elif stem.startswith("2") and status.get("frames") in ("unsupported", "not_recorded"):
+                    out.append("_This trace has no frame deadlines, so nothing here can say a "
+                               "frame was late. A frame count stands. Every other column is "
+                               "empty because it was not measured, not because it was zero._\n")
+                    out.append(md_table(h, r))
+                elif not r and stem == "11_startup_breakdown" and status.get("startup_breakdown") == "unavailable":
+                    out.append("_Perfetto's startup breakdown is not available for this "
+                               "trace: its standard library could not tie the launch to the "
+                               "app's process, which happens on older Android. The slices "
+                               "in `13_startup_top_slices` cover the same ground._\n")
                 elif not r and stem in STARTUP_STEMS and status["startup_capture"] == "missed":
                     out.append("_No rows: the capture missed the app launch. This is a "
                                "failed measurement, see the Trust check._\n")
@@ -1327,6 +1486,9 @@ def main():
     with open(os.path.join(args.out, "findings.json"), "w") as fh:
         payload = {"trace": args.trace, "pkg": args.pkg, "mode": mode,
                    "health_status": status, "findings": findings}
+        if capture:
+            payload["capture"] = {k: v for k, v in capture.items()
+                                  if k in ("sdk", "mode", "compile_status")}
         if code_map:
             payload["code_map"] = code_map
         if handoffs:

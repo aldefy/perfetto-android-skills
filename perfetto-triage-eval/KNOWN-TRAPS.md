@@ -205,6 +205,14 @@ cannot answer. The start type falls back to `cold` when `bindApplication` runs
 inside the launch, and the startup queries fall back to the main thread of the
 process named after the package.
 
+The first fix was not enough. It read the Android version from the trace, and
+that Android 10 trace carries neither the SDK level nor a build fingerprint. So
+the next run still said "No FrameTimeline data, record again", and the fix plan
+opened with "fix the capture first" for a capture that could never come out
+differently. `capture.sh` now writes the SDK level beside the trace, triage
+takes `--sdk`, and the package list is a last resort. On a cold-start capture a
+missing frame timeline is a note, not a reason to stop.
+
 **Why it matters:** this is Trap 3 again in a new place. An empty table and a
 table of zeros look the same as a good result unless something states that the
 measurement was not possible.

@@ -55,10 +55,16 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CFG="$HERE/../assets/startup_jank.pbtxt"
 OUTDIR="${OUTDIR:-./traces}"
 mkdir -p "$OUTDIR"
+OUTDIR="$(cd "$OUTDIR" && pwd)"   # absolute, so --stop can pull into it from anywhere
 STAMP=$(date +%H%M%S)
 OUT="$OUTDIR/${PKG}-${MODE}-${STAMP}.pftrace"
 DEV="/data/misc/perfetto-traces/triage-${STAMP}.pftrace"
-STATE="$OUTDIR/.capture-${PKG}.session"   # written by --start, read by --stop
+# Written by --start, read by --stop. It lives outside OUTDIR on purpose: a
+# --stop run with a different OUTDIR, or from another folder, must still find
+# the capture it is meant to stop.
+STATE_DIR="${TMPDIR:-/tmp}"
+STATE="${STATE_DIR%/}/perfetto-triage-capture-${PKG}.session"
+OLD_STATE="$OUTDIR/.capture-${PKG}.session"   # where older versions kept it
 
 # Pull the finished trace off the device and report it. Used by every mode.
 finish() {
@@ -81,6 +87,7 @@ finish() {
 }
 
 if [[ "$ACTION" == "stop" ]]; then
+  if [[ ! -f "$STATE" && -f "$OLD_STATE" ]]; then STATE="$OLD_STATE"; fi
   if [[ ! -f "$STATE" ]]; then
     echo "[capture] ERROR: no capture is running for $PKG. Start one with --start." >&2
     exit 6
@@ -174,6 +181,20 @@ elif grep -qw DEBUGGABLE <<<"$FLAG_LINES"; then
 else
   echo "[capture] build type: not debuggable"
 fi
+
+# What the trace itself may not say. Android 10 traces carry no Android version,
+# and no trace says how the app was compiled. triage.py reads this file when it
+# sits beside the trace: it is how the report knows that frame deadlines cannot
+# exist on this phone, and whether heavy JIT means "no profile" or "stale profile".
+COMPILE=$(grep -oE '\[status=[a-z-]+\]' <<<"$DUMP" | tr -d '[]' | cut -d= -f2 | sort -u | paste -sd, - || true)
+{
+  echo "sdk=$SDK"
+  echo "model=$MODEL"
+  echo "package=$PKG"
+  echo "mode=$MODE"
+  echo "compile_status=${COMPILE:-unknown}"
+} > "${OUT%.pftrace}.capture.txt"
+echo "[capture] compiled as: ${COMPILE:-unknown}"
 
 # Keep the screen on and awake; a dozing device produces garbage traces.
 adb shell svc power stayon usb >/dev/null 2>&1 || true

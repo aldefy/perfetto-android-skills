@@ -11,4 +11,8 @@ SELECT
   -- The phone's Android version decides what can be recorded at all: the frame
   -- timeline needs API 31 (Android 12). NULL when the trace does not say.
   (SELECT int_value FROM metadata WHERE name = 'android_sdk_version')     AS android_sdk,
-  (SELECT str_value FROM metadata WHERE name = 'android_build_fingerprint') AS build_fingerprint;
+  (SELECT str_value FROM metadata WHERE name = 'android_build_fingerprint') AS build_fingerprint,
+  -- Android 10 traces carry neither of the two above. The framework's own
+  -- package, "android", has the SDK level as its version code, so the package
+  -- list is a second way to read it.
+  (SELECT version_code FROM package_list WHERE package_name = 'android' LIMIT 1) AS framework_version;
