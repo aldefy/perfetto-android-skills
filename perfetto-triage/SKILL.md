@@ -52,6 +52,18 @@ scripts/capture.sh com.example.app                  # cold start
 scripts/capture.sh com.example.app --interactive 20 # you drive; captures jank
 ```
 
+When you are driving the app yourself (a UI script, an MCP tool, a test),
+do not guess a duration. Start the trace, run the flow, stop it:
+
+```bash
+scripts/capture.sh com.example.app --start
+# ... drive the flow, waiting on each screen to appear, not on a timer ...
+scripts/capture.sh com.example.app --stop
+```
+
+The trace then covers exactly the flow. A fixed window either cuts the end
+off or pads the trace with idle time, and both skew the frame counts.
+
 `capture.sh` checks the package flags first and exits 3 on a `debuggable`
 build. Do not work around that by default: get a release-like build. If debug
 is truly all there is, `--allow-debug` captures it and the report flags it.

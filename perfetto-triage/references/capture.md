@@ -46,6 +46,12 @@ adb shell dumpsys thermalservice | head -20   # throttling status
 adb shell dumpsys package <pkg> | grep -i debuggable   # any output = debuggable
 ```
 
+For a scripted flow use `scripts/capture.sh <pkg> --start`, then `--stop`
+when the flow ends. That mode streams the buffer to the file while it
+records, so a long flow cannot overwrite its own beginning. A fixed
+`--interactive N` window uses a 128 MB ring buffer, which a busy app can
+fill in well under a minute.
+
 `scripts/capture.sh` runs the debuggable check itself and exits 3 if the build
 is debuggable (`--allow-debug` overrides). `triage.py` checks again from the
 trace's `package_list`, so a trace captured another way is still covered.

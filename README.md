@@ -59,6 +59,8 @@ optimizing code that was never running.
 # 1. capture — device connected, app installed, screen on
 perfetto-triage/scripts/capture.sh com.example.app                  # cold start
 perfetto-triage/scripts/capture.sh com.example.app --interactive 20 # you drive, it records
+perfetto-triage/scripts/capture.sh com.example.app --start          # a flow of unknown length:
+perfetto-triage/scripts/capture.sh com.example.app --stop           # start, run it, stop
 
 # 2. triage — parses once, runs all 20 queries, writes a ranked report
 python3 perfetto-triage/scripts/triage.py trace.pftrace --pkg com.example.app --out triage-out
@@ -67,7 +69,10 @@ python3 perfetto-triage/scripts/triage.py trace.pftrace --pkg com.example.app --
 ```
 
 `capture.sh` refuses a debuggable build (exit 3). Pass `--allow-debug` to
-capture one anyway; the report will flag it. With more than one device
+capture one anyway; the report will flag it. Use `--start` and `--stop`
+when a script or an agent drives the app: the trace then holds exactly the
+flow, with no guessed duration. A started capture stops by itself after
+`--max` seconds (default 600). With more than one device
 attached (a phone on USB and Wi-Fi counts twice) it stops and lists them:
 pick one with `--serial <id>` or `ANDROID_SERIAL`.
 
