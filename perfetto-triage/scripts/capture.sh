@@ -5,6 +5,7 @@
 #   ./capture.sh com.example.app                 # cold start capture
 #   ./capture.sh com.example.app --interactive 20 # capture while you drive the app
 #   ./capture.sh com.example.app --allow-debug    # capture a debuggable build anyway
+#   ./capture.sh com.example.app --serial 4A121FDAQ0001B   # pick one of several devices
 #
 # Refuses a debuggable build by default: it runs 2 to 5x slower than release and
 # its numbers are not real. --allow-debug captures it anyway; triage.py reads the
@@ -13,7 +14,7 @@
 # Output: ./traces/<pkg>-<mode>-<n>.pftrace
 set -euo pipefail
 
-USAGE="usage: capture.sh <package> [--interactive SECONDS] [--allow-debug]"
+USAGE="usage: capture.sh <package> [--interactive SECONDS] [--allow-debug] [--serial SERIAL]"
 PKG="${1:?$USAGE}"
 shift || true
 MODE="startup"
@@ -26,6 +27,10 @@ while (( $# > 0 )); do
       if [[ "${2:-}" =~ ^[0-9]+$ ]]; then SECS="$2"; shift; else SECS=20; fi
       ;;
     --allow-debug) ALLOW_DEBUG=1 ;;
+    --serial)
+      if [[ -z "${2:-}" ]]; then echo "[capture] ERROR: --serial needs a value" >&2; exit 64; fi
+      export ANDROID_SERIAL="$2"; shift
+      ;;
     *) echo "[capture] ERROR: unknown argument '$1'" >&2; echo "$USAGE" >&2; exit 64 ;;
   esac
   shift
@@ -38,6 +43,22 @@ mkdir -p "$OUTDIR"
 STAMP=$(date +%H%M%S)
 OUT="$OUTDIR/${PKG}-${MODE}-${STAMP}.pftrace"
 DEV="/data/misc/perfetto-traces/triage-${STAMP}.pftrace"
+
+# One device, chosen on purpose. The same phone connected over USB and Wi-Fi
+# shows up as two entries, and every adb call below would fail with "more than
+# one device". Say which devices there are and stop, instead of failing later.
+if [[ -z "${ANDROID_SERIAL:-}" ]]; then
+  DEVICES=$(adb devices | tr -d '\r' | awk 'NR > 1 && $2 == "device" { print $1 }')
+  COUNT=$(grep -c . <<<"$DEVICES" || true)
+  if (( COUNT > 1 )); then
+    echo "[capture] ERROR: $COUNT devices are connected. Pick one with --serial" >&2
+    echo "[capture] (or set ANDROID_SERIAL). A phone on both USB and Wi-Fi counts twice:" >&2
+    sed 's/^/[capture]   /' <<<"$DEVICES" >&2
+    exit 4
+  fi
+else
+  echo "[capture] using device $ANDROID_SERIAL"
+fi
 
 adb wait-for-device >/dev/null
 SDK=$(adb shell getprop ro.build.version.sdk | tr -d '\r')
@@ -108,7 +129,12 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 
-adb pull "$DEV" "$OUT" >/dev/null
+# adb pull writes its progress line to stderr, so silence both streams and
+# report a failure ourselves.
+if ! adb pull "$DEV" "$OUT" >/dev/null 2>&1; then
+  echo "[capture] ERROR: could not pull $DEV from the device." >&2
+  exit 5
+fi
 adb shell rm -f "$DEV" || true
 adb shell svc power stayon false >/dev/null 2>&1 || true
 

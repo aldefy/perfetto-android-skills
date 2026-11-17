@@ -56,6 +56,9 @@ scripts/capture.sh com.example.app --interactive 20 # you drive; captures jank
 build. Do not work around that by default: get a release-like build. If debug
 is truly all there is, `--allow-debug` captures it and the report flags it.
 
+If it exits 4, more than one device is attached (the same phone on USB and
+Wi-Fi shows up twice). Ask which one, then pass `--serial <id>`.
+
 This pushes `assets/startup_jank.pbtxt` to the device. Use that config, not the
 lightweight `adb shell perfetto <categories>` form: the lightweight form cannot
 enable `android.surfaceflinger.frametimeline`, so you get no jank attribution

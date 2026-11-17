@@ -316,11 +316,17 @@ def analyse(results: dict, pkg: str, mode: str = "unknown",
     f = []
     hs = status if status is not None else health_status(results, pkg, mode)
 
-    def add(severity, area, title, detail, action):
+    src = []  # query stems the next finding is derived from
+
+    def add(severity, area, title, detail, action, source=None):
         f.append({"severity": severity, "area": area, "title": title,
-                  "detail": detail, "action": action})
+                  "detail": detail, "action": action,
+                  "source": list(source if source is not None else src)})
 
     def table(stem):
+        # Reading a table makes it the evidence for the findings that follow,
+        # so every finding names the CSV its numbers can be re-checked in.
+        src[:] = [stem]
         h, r = results.get(stem, ([], []))
         return as_dicts(h, r)
 
@@ -334,6 +340,7 @@ def analyse(results: dict, pkg: str, mode: str = "unknown",
             "Numbers from a lossy trace are not comparable across runs.")
 
     if hs["build_type"] == "debuggable":
+        src[:] = ["03_build_type"]
         add("blocker", "trace", "Debuggable build: every timing here is directional only",
             f"package_list reports {hs['build_type_detail']}. A debuggable build "
             "runs 2 to 5x slower than release, with JIT and ART checks that release "
@@ -342,6 +349,7 @@ def analyse(results: dict, pkg: str, mode: str = "unknown",
             "before reporting any number from this trace. The findings below still "
             "point at real code paths, but their sizes are not real.")
     elif hs["build_type"] == "unknown":
+        src[:] = ["03_build_type"]
         add("info", "trace", "Build type not verified",
             f"{hs['build_type_detail']}. This report cannot tell whether the app "
             "was a release build.",
@@ -374,6 +382,7 @@ def analyse(results: dict, pkg: str, mode: str = "unknown",
                 "present), so the capture window did not line up with the launch"
                 if hs["coverage"].get("sched") == "ok" and hs["coverage"].get("slices") == "ok"
                 else "core data sources are missing too, so the capture itself is broken")
+        src[:] = ["10_startup_summary", "01_coverage"]
         add("blocker", "startup", "Startup capture missed the app launch",
             f"android_startups has no launch for this package, and {rest}. "
             "This is a failed measurement, not a healthy startup.",
@@ -381,6 +390,7 @@ def analyse(results: dict, pkg: str, mode: str = "unknown",
             "trace and force-stopping the app in scripts/capture.sh. Do not read "
             "the absence of startup findings as 'startup is fine'.")
     elif hs["startup_capture"] == "unknown" and "10_startup_summary" in results:
+        src[:] = ["10_startup_summary"]
         add("info", "startup", "No app launch found in this trace",
             "android_startups has no launch for this package, and the capture mode "
             "is not known, so this may or may not be expected.",
@@ -484,6 +494,19 @@ def analyse(results: dict, pkg: str, mode: str = "unknown",
         break
 
     # --- 2. Jank ----------------------------------------------------------
+    # The findings after the summary (thread split, hot slices) describe where
+    # janky-frame time went. They can never matter more than the jank itself:
+    # "cost is on the RenderThread" at medium is noise when 0.3% of frames are
+    # janky. So they are capped at the summary's severity, and say the rate.
+    rank = {"blocker": 0, "high": 1, "medium": 2, "info": 3}
+    jank_cap = "info" if "20_jank_summary" in results else None
+    jank_ctx = ""
+
+    def capped(sev):
+        if jank_cap is None:
+            return sev
+        return sev if rank[sev] >= rank[jank_cap] else jank_cap
+
     for r in table("20_jank_summary"):
         if pkg not in ("*", "") and not _glob(r.get("process_name", ""), pkg):
             continue
@@ -493,9 +516,13 @@ def analyse(results: dict, pkg: str, mode: str = "unknown",
         app_j = num(r.get("app_jank")) or 0
         sf_j = num(r.get("sf_jank")) or 0
         worst = num(r.get("worst_overrun_ms")) or 0
+        if frames >= 10 and not jank_ctx:
+            jank_ctx = f" Jank rate: {int(janky)} of {int(frames)} frames ({pct:.1f}%)."
         if frames < 10 or janky == 0:
             continue
         sev = "high" if pct > 5 else "medium" if pct > 1 else "info"
+        if rank[sev] < rank[jank_cap]:
+            jank_cap = sev
         blame = ("the app" if app_j >= sf_j else "SurfaceFlinger / the display pipeline")
         add(sev, "jank",
             f"{r['process_name']}: {int(janky)}/{int(frames)} frames janky ({pct:.1f}%)",
@@ -516,14 +543,23 @@ def analyse(results: dict, pkg: str, mode: str = "unknown",
         vs = num(r.get("vsync_delay_ms")) or 0
         if ui + rt == 0:
             continue
-        if rt > ui:
-            add("medium", "jank", f"{r['process_name']}: cost is on the RenderThread",
-                f"doFrame {ui:.0f} ms vs DrawFrame {rt:.0f} ms (vsync delay {vs:.0f} ms).",
+        numbers = (f"doFrame {ui:.0f} ms vs DrawFrame {rt:.0f} ms "
+                   f"(vsync delay {vs:.0f} ms).{jank_ctx}")
+        if abs(ui - rt) <= 0.10 * max(ui, rt):
+            # Within 10% of each other: naming one thread would be a coin toss.
+            add(capped("medium"), "jank",
+                f"{r['process_name']}: cost is split between the UI thread and RenderThread",
+                numbers,
+                "Neither thread dominates. Check both: measure/layout and recomposition "
+                "on the UI thread, overdraw and shader work on the RenderThread.")
+        elif rt > ui:
+            add(capped("medium"), "jank", f"{r['process_name']}: cost is on the RenderThread",
+                numbers,
                 "Look for overdraw, large/unbounded bitmaps, expensive shaders, and "
                 "hardware-layer thrash. Shader compilation on first use is a classic here.")
         else:
-            add("medium", "jank", f"{r['process_name']}: cost is on the UI thread",
-                f"doFrame {ui:.0f} ms vs DrawFrame {rt:.0f} ms (vsync delay {vs:.0f} ms).",
+            add(capped("medium"), "jank", f"{r['process_name']}: cost is on the UI thread",
+                numbers,
                 "Look for measure/layout passes, recomposition, main-thread IO or "
                 "deserialisation, and work posted onto the main Handler.")
         break
@@ -533,16 +569,18 @@ def analyse(results: dict, pkg: str, mode: str = "unknown",
         r"CreateGraphicsPipeline|CompileAfterCacheMiss|shader|Program", r["name"], re.I)]
     if shader:
         tot = sum(num(r["total_ms"]) or 0 for r in shader)
-        add("high", "jank", f"Shader / pipeline compilation during janky frames ({tot:.0f} ms)",
-            "Slices matched: " + ", ".join(r["name"] for r in shader[:3]),
+        add(capped("high"), "jank",
+            f"Shader / pipeline compilation during janky frames ({tot:.0f} ms)",
+            "Slices matched: " + ", ".join(r["name"] for r in shader[:3]) + "." + jank_ctx,
             "This is first-run-only jank that every user hits. Warm it up: run the "
             "animation once behind a splash, or ship a Baseline Profile — "
             "ProfileInstaller also primes the shader cache.")
     inflate = [r for r in hot if re.search(r"inflate|measure|layout|traversal", r["name"], re.I)]
     if inflate:
         tot = sum(num(r["total_ms"]) or 0 for r in inflate)
-        add("medium", "jank", f"Measure/layout/traversal cost during janky frames ({tot:.0f} ms)",
-            "Slices matched: " + ", ".join(r["name"] for r in inflate[:3]),
+        add(capped("medium"), "jank",
+            f"Measure/layout/traversal cost during janky frames ({tot:.0f} ms)",
+            "Slices matched: " + ", ".join(r["name"] for r in inflate[:3]) + "." + jank_ctx,
             "Flatten the hierarchy, avoid nested weights / double measure, and hoist "
             "state so recomposition scopes stay small.")
 
@@ -646,6 +684,10 @@ def _glob(value: str, pattern: str) -> bool:
 
 # --------------------------------------------------------------------------
 
+STARTUP_STEMS = {"10_startup_summary", "11_startup_breakdown",
+                 "12_startup_main_thread_state", "13_startup_top_slices",
+                 "14_startup_class_loading", "15_startup_binder"}
+
 SECTIONS = [
     ("Is this trace trustworthy?",
      ["00_health", "01_coverage", "02_processes", "03_build_type"]),
@@ -737,6 +779,10 @@ def main():
         out.append("")
         out.append(f["detail"])
         out.append("")
+        if f.get("source"):
+            out.append("Measured in: " + ", ".join(f"`{x}`" for x in f["source"])
+                       + " (see Evidence, and `csv/`).")
+            out.append("")
         out.append(f"**What to do:** {f['action']}")
         out.append("")
     out.append("---")
@@ -760,7 +806,14 @@ def main():
                 out.append(f"```\nQUERY FAILED: {errors[stem]}\n```")
             else:
                 h, r = results[stem]
-                out.append(md_table(h, r))
+                if not r and stem in STARTUP_STEMS and status["startup_capture"] == "not_expected":
+                    out.append("_Not applicable: this is an interactive capture, so no "
+                               "app launch is expected in it._\n")
+                elif not r and stem in STARTUP_STEMS and status["startup_capture"] == "missed":
+                    out.append("_No rows: the capture missed the app launch. This is a "
+                               "failed measurement, see the Trust check._\n")
+                else:
+                    out.append(md_table(h, r))
             out.append("")
 
     report = os.path.join(args.out, "report.md")
