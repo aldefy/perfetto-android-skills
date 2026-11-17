@@ -381,10 +381,13 @@ def heavy_jit_is_read_against_how_the_install_was_compiled():
         r["40_slice_hotspots"] = (["name", "thread_name", "n", "total_ms", "self_ms"],
                                   [["Compiling", "Jit thread pool", "600", "2600", "2600"]])
         return [x for x in run_with(r, capture)[1] if x["kind"] == "jit_compile"][0]
-    stale = jit({"compile_status": "speed-profile"})
-    assert "does not cover the code that ran" in stale["detail"], stale
-    assert "Regenerate the Baseline Profile" in stale["action"]
-    assert "installed with adb" not in stale["detail"], "it is compiled: do not say it is not"
+    label = jit({"compile_status": "speed-profile"})
+    assert "does not prove" in label["detail"], label
+    assert "INSTALL_PROFILE" in label["action"] and "stale" in label["action"]
+    sideloaded = jit({"compile_status": "speed-profile", "compile_reason": "install"})
+    assert "ran without its profile" in sideloaded["detail"], sideloaded
+    assert "INSTALL_PROFILE" in sideloaded["action"]
+    assert "stale, or it was recorded" not in sideloaded["detail"], "the label is not proof"
     raw = jit({"compile_status": "verify"})
     assert "not a compiled profile" in raw["detail"] and "compile -f -m speed-profile" in raw["action"]
     unknown = jit(None)

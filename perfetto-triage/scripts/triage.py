@@ -484,6 +484,8 @@ def health_status(results: dict, pkg: str, mode: str = "unknown",
     hs["device"] = device_info(cov[0] if cov else None, capture)
     status = (capture or {}).get("compile_status")
     hs["compile_status"] = status if status and status != "unknown" else None
+    reason = (capture or {}).get("compile_reason")
+    hs["compile_reason"] = reason if reason and reason != "unknown" else None
     # The stdlib's startup breakdown needs to tie the launch to its process,
     # which it cannot do on older Android. Say so instead of showing nothing.
     if "11_startup_breakdown" in results and "10_startup_summary" in results:
@@ -985,15 +987,37 @@ def analyse(results: dict, pkg: str, mode: str = "unknown",
         compiled = hs.get("compile_status") or ""
         base = ("That is the time in 'Compiling' slices on the app's JIT thread. Code that "
                 "was compiled ahead of time does not need the JIT. ")
-        if "speed-profile" in compiled or compiled in ("speed", "everything"):
-            detail = (base + f"capture.sh read the install as {compiled}, so a profile is "
-                      "compiled. The JIT was still this busy, which means the profile does "
-                      "not cover the code that ran: it is stale, or it was recorded over a "
-                      "different path.")
-            action = ("Regenerate the Baseline Profile over the path that was captured "
-                      "(startup, and the first screens), ship it, and compile it on the test "
-                      "install: adb shell cmd package compile -f -m speed-profile <pkg>. "
-                      "Then capture again and compare JIT compile (ms).")
+        if "speed-profile" in compiled:
+            # The label is not proof. A build installed with adb reads speed-profile
+            # from install time, before profileinstaller has copied the Baseline
+            # Profile in, so ART compiled against an empty profile. Measured on a
+            # real app: JIT 2.2 s -> 0.1 s and TTID -28% once the profile was applied.
+            reason = hs.get("compile_reason") or ""
+            label = f"capture.sh read the install as {compiled}" + (f", reason={reason}" if reason else "")
+            if reason == "install":
+                detail = (base + label + ". On a build installed with adb that label does not mean the "
+                          "Baseline Profile was applied. The profileinstaller library copies it in on "
+                          "first launch, and it only takes effect after the next compile. So the most "
+                          "likely reading is that this install ran without its profile, and every "
+                          "startup number here is slower than what store users get.")
+            else:
+                detail = (base + label + ". That label alone does not prove the Baseline Profile was "
+                          "applied. If it was, the profile does not cover the code that ran: it is "
+                          "stale, or it was recorded over a different path. Prove which before "
+                          "changing the profile.")
+            action = ("Prove the profile is applied, then capture again: launch the app once and "
+                      "force-stop it; adb shell am broadcast -a "
+                      "androidx.profileinstaller.action.INSTALL_PROFILE "
+                      "<pkg>/androidx.profileinstaller.ProfileInstallReceiver; adb shell cmd package "
+                      "compile -f -m speed-profile <pkg>. Do the same to the before and after "
+                      "builds. If the JIT is still this busy, the profile is stale: regenerate it "
+                      "over the path that was captured.")
+        elif compiled in ("speed", "everything"):
+            detail = (base + f"capture.sh read the install as {compiled}, so the whole app is "
+                      "compiled ahead of time. The JIT should be nearly idle. Check that the "
+                      "capture is of this install.")
+            action = ("Confirm the status on the phone: adb shell dumpsys package dexopt | grep -A3 "
+                      "<pkg>. Then capture again.")
         elif compiled:
             detail = (base + f"capture.sh read the install as {compiled}, which is not a "
                       "compiled profile. Every number in this report was taken on code that "
@@ -1009,8 +1033,8 @@ def analyse(results: dict, pkg: str, mode: str = "unknown",
             action = ("See how the app is compiled: adb shell dumpsys package dexopt | grep -A2 "
                       "<pkg>. Not speed-profile: compile it with adb shell cmd package compile "
                       "-f -m speed-profile <pkg>, which needs a Baseline Profile in the APK. "
-                      "Already speed-profile: the profile is stale or misses this path, so "
-                      "regenerate it. Then capture again.")
+                      "Already speed-profile: that label alone does not prove the profile was "
+                      "applied (see SKILL.md, \"Prove the profile is applied\"). Then capture again.")
         add("medium", "runtime",
             f"The JIT compiler ran for {jit:,.0f} ms, {100 * jit / span:.0f}% of the capture",
             detail, action)
@@ -1514,7 +1538,7 @@ def main():
                    "health_status": status, "findings": findings}
         if capture:
             payload["capture"] = {k: v for k, v in capture.items()
-                                  if k in ("sdk", "mode", "compile_status")}
+                                  if k in ("sdk", "mode", "compile_status", "compile_reason")}
         if code_map:
             payload["code_map"] = code_map
         if handoffs:

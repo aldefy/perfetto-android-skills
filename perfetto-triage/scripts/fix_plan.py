@@ -81,6 +81,7 @@ FIXES = {
         "change": ["See how it is compiled: adb shell dumpsys package dexopt | grep -A2 <pkg>",
                    "Not speed-profile: adb shell cmd package compile -f -m speed-profile <pkg>, then capture again",
                    "If the APK carries no Baseline Profile, that command has nothing to compile. Add a profile first",
+                   "Already speed-profile? The label is not proof. Launch once, force-stop, send the INSTALL_PROFILE broadcast, then compile -f -m speed-profile",
                    "Do this to the before build and the after build alike, or the comparison is not fair"],
         "check": ["JIT compile (ms)"] + START,
         "where_hint": "baseline-prof.txt, or the module that generates the profile"},

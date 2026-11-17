@@ -30,7 +30,16 @@ reset_compilation() {
 }
 
 case "$MODE" in
-  profile) adb shell cmd package compile -m speed-profile -f "$PKG" >/dev/null ;;
+  profile)
+    # The status reads speed-profile straight after an adb install, before the
+    # Baseline Profile is in place: profileinstaller copies it in on first
+    # launch. Launch once, ask it to install the profile, then compile.
+    adb shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1 || true
+    sleep 10
+    adb shell am force-stop "$PKG"
+    adb shell am broadcast -a androidx.profileinstaller.action.INSTALL_PROFILE \
+      "$PKG/androidx.profileinstaller.ProfileInstallReceiver" >/dev/null 2>&1 || true
+    adb shell cmd package compile -m speed-profile -f "$PKG" >/dev/null ;;
   none)    : ;;
   asis)    : ;;
   *) echo "unknown mode: $MODE" >&2; exit 2 ;;

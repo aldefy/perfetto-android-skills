@@ -217,6 +217,31 @@ missing frame timeline is a note, not a reason to stop.
 table of zeros look the same as a good result unless something states that the
 measurement was not possible.
 
+## Trap 5: the speed-profile label taken as proof that the profile ran
+
+**What happened:** a release build was installed with adb on an Android 10
+phone and measured 10 times. `capture.sh` read the install as `speed-profile`,
+and the JIT ran for about 2 s of every 12 s capture. The report said a profile
+was compiled and the JIT was busy anyway, so the profile was stale and should
+be regenerated. That was wrong. The status had been set at install, before the
+app had ever run, and the profileinstaller library had not yet copied the
+Baseline Profile in. ART had compiled against an empty profile.
+
+After one launch, the INSTALL_PROFILE broadcast and a compile, the label still
+read `speed-profile`. Ten runs against the earlier ten, same APK: JIT 2,169 ms
+to 118 ms, TTID 674 ms to 487 ms, main thread running 80% to 50%, all clear.
+Main-thread binder did not move. The profile was fine.
+
+**The fix:** `capture.sh` also records the dexopt reason and prints a note for
+`speed-profile` with `reason=install`. The JIT finding no longer calls a
+profile stale on the label alone: it says the label is not proof, gives the
+commands that apply the profile, and calls it stale only if the JIT stays busy
+after that. `ab_startup.sh ... profile` now launches, installs the profile and
+then compiles. SKILL.md has a "Prove the profile is applied" step.
+
+**Why it matters:** a status string was read as a measurement. Every startup
+number from such an install is a test set-up that store users never have.
+
 ## What this means for now
 
 Run `python3 run_eval.py`. As of this commit: Traps 2 and 3 pass against the
