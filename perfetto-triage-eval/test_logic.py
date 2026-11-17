@@ -159,6 +159,66 @@ def mode_is_read_from_capture_sh_filenames_only():
     assert triage.infer_mode("") == "unknown"
 
 
+JANK_H = ["process_name", "frames", "janky", "janky_pct", "app_jank", "sf_jank",
+          "worst_overrun_ms"]
+SPLIT_H = ["process_name", "ui_thread_ms", "render_thread_ms", "vsync_delay_ms"]
+HOT_H = ["name", "total_ms", "max_ms"]
+
+
+def jank_case(frames, janky, pct, ui, rt):
+    r = base()
+    r["20_jank_summary"] = (JANK_H, [[PKG, str(frames), str(janky), str(pct), "2", "1", "7"]])
+    r["22_jank_cpu_split"] = (SPLIT_H, [[PKG, str(ui), str(rt), "3"]])
+    r["23_jank_hot_slices"] = (HOT_H, [["measure", "57", "9"],
+                                        ["CreateGraphicsPipeline", "30", "12"]])
+    return r
+
+
+@case
+def low_jank_rate_caps_follow_on_findings_at_info():
+    # 9 of 3,000 frames janky: "cost is on the RenderThread" must not be rated
+    # medium, nor shader compilation high, on a trace that is 99.7% smooth
+    _, f = run(jank_case(3000, 9, 0.3, 40, 60), mode="interactive")
+    jank = [x for x in f if x["area"] == "jank"]
+    assert jank and all(x["severity"] == "info" for x in jank), [(x["severity"], x["title"]) for x in jank]
+    assert any("9 of 3000 frames (0.3%)" in x["detail"] for x in jank), jank
+
+
+@case
+def high_jank_rate_keeps_follow_on_severity():
+    _, f = run(jank_case(100, 40, 40.0, 45, 90), mode="interactive")
+    sev = {x["title"].split(":")[-1].strip()[:28]: x["severity"] for x in f if x["area"] == "jank"}
+    assert "high" in sev.values() and "medium" in sev.values(), sev
+    assert any(x["severity"] == "high" and "Shader" in x["title"] for x in f), sev
+
+
+@case
+def no_janky_frames_means_no_medium_jank_findings():
+    _, f = run(jank_case(500, 0, 0.0, 45, 90), mode="interactive")
+    assert all(x["severity"] == "info" for x in f if x["area"] == "jank"), f
+
+
+@case
+def near_equal_thread_cost_is_called_a_split():
+    # 50 ms vs 52 ms is a coin toss, not "the RenderThread"
+    _, f = run(jank_case(100, 40, 40.0, 50, 52), mode="interactive")
+    assert any("split between the UI thread and RenderThread" in x["title"] for x in f), [x["title"] for x in f]
+    _, f = run(jank_case(100, 40, 40.0, 45, 90), mode="interactive")
+    assert any(x["title"].endswith("cost is on the RenderThread") for x in f)
+
+
+@case
+def every_finding_names_the_query_it_came_from():
+    for r, mode in ((jank_case(100, 40, 40.0, 45, 90), "interactive"),
+                    (base(debuggable="1"), "startup"),
+                    (base(startups=False), "startup")):
+        _, f = run(r, mode=mode)
+        assert f and all(x.get("source") for x in f), [(x["title"], x.get("source")) for x in f]
+    _, f = run(base(startups=False), mode="startup")
+    missed = [x for x in f if x["title"] == "Startup capture missed the app launch"][0]
+    assert missed["source"] == ["10_startup_summary", "01_coverage"], missed["source"]
+
+
 def main():
     failed = 0
     for fn in CASES:

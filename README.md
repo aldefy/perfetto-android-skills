@@ -67,7 +67,9 @@ python3 perfetto-triage/scripts/triage.py trace.pftrace --pkg com.example.app --
 ```
 
 `capture.sh` refuses a debuggable build (exit 3). Pass `--allow-debug` to
-capture one anyway; the report will flag it.
+capture one anyway; the report will flag it. With more than one device
+attached (a phone on USB and Wi-Fi counts twice) it stops and lists them:
+pick one with `--serial <id>` or `ANDROID_SERIAL`.
 
 No trace file and no device means nothing runs. This skill will not
 fabricate a measurement. See the hard rules in `SKILL.md`.
@@ -94,6 +96,12 @@ the code paths it points at are real, the numbers are not quotable.
 `triage.py` works out whether a launch was expected from a `capture.sh`
 filename (`<pkg>-startup-<stamp>.pftrace`). For a trace named some other way,
 pass `--mode startup` or `--mode interactive`.
+
+Every finding also carries a `source` list: the query stems its numbers came
+from, so each one can be re-checked in `csv/<stem>.csv`. Findings about where
+janky-frame time went (thread split, hot slices) are capped at the severity of
+the jank rate itself, so a trace with 0.3% janky frames does not produce a
+medium "cost is on the RenderThread".
 
 ## Fix and re-measure
 
