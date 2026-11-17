@@ -187,14 +187,23 @@ fi
 # sits beside the trace: it is how the report knows that frame deadlines cannot
 # exist on this phone, and whether heavy JIT means "no profile" or "stale profile".
 COMPILE=$(grep -oE '\[status=[a-z-]+\]' <<<"$DUMP" | tr -d '[]' | cut -d= -f2 | sort -u | paste -sd, - || true)
+# Why it reads that way. reason=install on a build installed with adb means the
+# label came from install time, before profileinstaller copied the Baseline
+# Profile in, so speed-profile can sit on top of an empty profile.
+REASON=$(grep -oE '\[reason=[a-z-]+\]' <<<"$DUMP" | tr -d '[]' | cut -d= -f2 | sort -u | paste -sd, - || true)
 {
   echo "sdk=$SDK"
   echo "model=$MODEL"
   echo "package=$PKG"
   echo "mode=$MODE"
   echo "compile_status=${COMPILE:-unknown}"
+  echo "compile_reason=${REASON:-unknown}"
 } > "${OUT%.pftrace}.capture.txt"
-echo "[capture] compiled as: ${COMPILE:-unknown}"
+echo "[capture] compiled as: ${COMPILE:-unknown} (reason: ${REASON:-unknown})"
+if [[ "$COMPILE" == *speed-profile* && "$REASON" == install ]]; then
+  echo "[capture] NOTE: speed-profile with reason=install. On a build installed with adb the Baseline" \
+       "Profile is usually not applied yet. See SKILL.md, \"Prove the profile is applied\"."
+fi
 
 # Keep the screen on and awake; a dozing device produces garbage traces.
 adb shell svc power stayon usb >/dev/null 2>&1 || true

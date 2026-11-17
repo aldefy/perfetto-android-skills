@@ -412,14 +412,25 @@ the top self-time hotspots side by side. It does not compute a single
 single number invites picking the flattering run out of ten, which is
 exactly what the next paragraph exists to prevent.
 
-If the fix is a Baseline Profile, check that it was compiled before you
-measure. A profile in a sideloaded APK is not compiled at install the way a
-store install is, so the after build can measure the same as the before:
+**Prove the profile is applied.** A build installed with adb can read
+`status=speed-profile` with an empty profile behind it: the label is set at
+install, and the profileinstaller library only copies the Baseline Profile in
+on first launch. Measure that install and every startup number is slower than
+what store users get. On a real app the JIT went from 2.2 s to 0.1 s and TTID
+from 674 to 487 ms (10 v 10, both clear) once the profile was applied, with the
+label the same before and after. So before any startup baseline, and on the
+before and after builds alike:
 
 ```bash
-adb shell dumpsys package dexopt | grep -A2 com.example.app   # want status=speed-profile
-scripts/ab_startup.sh com.example.app .MainActivity 10 profile   # compiles, then measures
+adb shell monkey -p com.example.app -c android.intent.category.LAUNCHER 1; sleep 10
+adb shell am force-stop com.example.app
+adb shell am broadcast -a androidx.profileinstaller.action.INSTALL_PROFILE \
+  com.example.app/androidx.profileinstaller.ProfileInstallReceiver
+adb shell cmd package compile -f -m speed-profile com.example.app
+scripts/ab_startup.sh com.example.app .MainActivity 10 profile   # does the above, then measures
 ```
+
+Only when the JIT is still busy after that is the profile stale.
 
 Use the same mode for both builds.
 
