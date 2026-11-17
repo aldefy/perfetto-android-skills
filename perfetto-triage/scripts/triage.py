@@ -798,8 +798,9 @@ def main():
                          "mode a trace with no app launch is reported as a failed "
                          "capture instead of silently having no startup findings.")
     ap.add_argument("--app-repo", default=None,
-                    help="the app's source tree. report.html takes its colours from the "
-                         "app's own theme tokens when it can find them.")
+                    help="the app's source tree. Hot slice names are checked against it, "
+                         "so the report says which ones are the app's own code, and "
+                         "report.html takes its colours from the app's theme tokens.")
     ap.add_argument("--query-timeout", type=float, default=600,
                     help="seconds one query may run before it is abandoned and "
                          "reported as not finished (default 600)")
@@ -854,6 +855,22 @@ def main():
     findings = analyse(results, args.pkg, mode, status)
     findings = unfinished_findings(errors) + findings
 
+    code_map = None
+    if args.app_repo:
+        log("checking hot slice names against the app's source")
+        try:  # a convenience on top of the findings; it must never fail a triage
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                "code_map", os.path.join(HERE, "code_map.py"))
+            cmod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(cmod)
+            code_map = cmod.build(results, args.app_repo, args.pkg)
+            order = {"blocker": 0, "high": 1, "medium": 2, "info": 3}
+            findings = sorted(findings + cmod.findings(code_map),
+                              key=lambda x: order.get(x["severity"], 9))
+        except Exception as exc:
+            log(f"code map skipped: {exc}")
+
     # ---- report.md
     icon = {"blocker": "🛑", "high": "🔴", "medium": "🟠", "info": "🔵"}
     out = [f"# Perfetto triage — `{os.path.basename(args.trace)}`", ""]
@@ -881,6 +898,22 @@ def main():
                        + " (see Evidence, and `csv/`).")
             out.append("")
         out.append(f"**What to do:** {f['action']}")
+        out.append("")
+    if code_map and code_map.get("checked"):
+        out.append("## Whose code")
+        out.append("")
+        out.append(f"Hot slice names checked against `{code_map['repo']}` "
+                   f"({code_map['files_scanned']} source files, "
+                   f"{code_map['sections_declared']} trace sections declared). "
+                   f"\"not in your source\" describes the search, not the slice: a name "
+                   f"built at runtime or code in a dependency will not be found.")
+        out.append("")
+        out.append("| Slice | ms | Whose | Evidence |")
+        out.append("|---|---|---|---|")
+        for sl in code_map["slices"][:20]:
+            whose = "app: " + sl["how"] if sl["owner"] == "app" else "not in your source"
+            out.append(f"| {fmt_cell(sl['name'])} | {sl['ms']:,.1f} | {whose} | "
+                       f"{('`' + sl['evidence'] + '`') if sl['evidence'] else ''} |")
         out.append("")
     out.append("---")
     out.append("")
@@ -917,8 +950,11 @@ def main():
     log("writing report.md and findings.json")
     open(report, "w").write("\n".join(out))
     with open(os.path.join(args.out, "findings.json"), "w") as fh:
-        json.dump({"trace": args.trace, "pkg": args.pkg, "mode": mode,
-                   "health_status": status, "findings": findings}, fh, indent=2)
+        payload = {"trace": args.trace, "pkg": args.pkg, "mode": mode,
+                   "health_status": status, "findings": findings}
+        if code_map:
+            payload["code_map"] = code_map
+        json.dump(payload, fh, indent=2)
 
     visual = None
     if not args.no_html:

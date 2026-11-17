@@ -532,10 +532,11 @@ def bar_chart(rows: list[tuple[str, float, str]], label: str) -> str:
     if not rows:
         return ""
     top = max(r[1] for r in rows)
-    out = [f'<div class="plot bars" role="img" aria-label="{esc(label)}">']
-    for name, value, note in rows:
+    out = [f'<div class="plot bars" role="img" aria-label="{esc(label)}">']  # rows may carry a 4th item: a badge
+    for name, value, note, *rest in rows:
+        badge = f'<span class="own">{esc(rest[0])}</span>' if rest and rest[0] else ""
         out.append(
-            f'<div class="bar-row"><span class="bar-name" title="{esc(name)}">{esc(name)}</span>'
+            f'<div class="bar-row"><span class="bar-name" title="{esc(name)}">{badge}{esc(name)}</span>'
             f'<span class="bar-track"><span class="bar-fill" style="width:{100 * value / top:.2f}%">'
             f'</span></span><span class="bar-val">{esc(ms(value))}'
             f'{"<i>" + esc(note) + "</i>" if note else ""}</span></div>')
@@ -606,7 +607,8 @@ def figure(title: str, how: str, chart: str, means: str = "", where: str = "") -
     out = [f'<figure><figcaption><h3>{esc(title)}</h3><p class="how">{esc(how)}</p>'
            f'</figcaption>{chart}']
     if means:
-        out.append(f'<p class="means"><b>What it means.</b> {esc(means)}</p>')
+        out.append(f'<p class="means"><span class="tag">inference</span><b>What it means.</b> '
+                   f'{esc(means)}</p>')
     if where:
         out.append(f'<p class="where"><b>See it in Perfetto.</b> {esc(where)}</p>')
     out.append("</figure>")
@@ -631,6 +633,8 @@ def section_of(f: dict) -> str:
     src = f.get("source") or []
     if f.get("area") == "trace":
         return "q1"
+    if f.get("area") == "code":
+        return "q4"
     if any(s.startswith(("12_", "33_")) for s in src):
         return "q2"
     if any(s.startswith("2") for s in src):
@@ -831,8 +835,22 @@ def q3_frames(out_dir: str, pkg: str, hs: dict | None) -> str:
     return "".join(p for p in parts if p)
 
 
-def q4_time(out_dir: str, pkg: str, hs: dict | None) -> str:
+def q4_time(out_dir: str, pkg: str, hs: dict | None, cm: dict | None = None) -> str:
     parts = []
+    owned = {s["name"]: s for s in (cm or {}).get("slices", []) if s.get("owner") == "app"}
+
+    def badge(name):
+        return "your code" if name in owned else ""
+
+    def evidence(names):
+        hits = [owned[n] for n in names if n in owned]
+        if not hits:
+            return ""
+        return ('<ul class="evidence">' + "".join(
+            f'<li><span class="own">your code</span><code>{esc(h["name"])}</code> '
+            f'<span>{esc(h["how"])}, <code>{esc(h["evidence"] or "")}</code></span></li>'
+            for h in hits) + "</ul>")
+
     startup = read_csv(out_dir, "10_startup_summary")
     if startup:
         s = startup[0]
@@ -855,12 +873,14 @@ def q4_time(out_dir: str, pkg: str, hs: dict | None) -> str:
                             bar_chart(br, "Startup time by reason"), "",
                             "Find the Android App Startups track near the top of the trace. "
                             "Selecting the startup slice highlights this window."))
-        top = [(r.get("slice_name", ""), num(r.get("total_ms")), f"{r.get('n', '')}x")
+        top = [(r.get("slice_name", ""), num(r.get("total_ms")), f"{r.get('n', '')}x",
+                badge(r.get("slice_name", "")))
                for r in read_csv(out_dir, "13_startup_top_slices")][:8]
         parts.append(figure("Longest slices on the main thread during startup",
                             "Ranked by total time. A parent slice includes everything nested "
                             "under it, so read this for where to look, not for blame.",
-                            bar_chart(top, "Longest startup slices")))
+                            bar_chart(top, "Longest startup slices")
+                            + evidence([t[0] for t in top])))
     elif hs and hs.get("startup_capture") == "missed":
         parts.append('<p class="empty">The capture was meant to contain an app launch and does '
                      'not. This is a failed measurement, not a fast startup.</p>')
@@ -869,13 +889,29 @@ def q4_time(out_dir: str, pkg: str, hs: dict | None) -> str:
     if hot:
         parts.append("<h3 class='sub'>Hot slices</h3>")
         rows = [(f"{r.get('name', '')} · {r.get('thread_name', '')}", num(r.get("self_ms")),
-                 f"{r.get('n', '')}x") for r in hot]
+                 f"{r.get('n', '')}x", badge(r.get("name", ""))) for r in hot]
+        names = [r.get("name", "") for r in hot]
+        mine = sum(1 for n in names if n in owned)
+        if not cm or not cm.get("checked"):
+            means = ("A name here that does not appear anywhere in the app's source is a "
+                     "framework or system slice. The app caused it but did not write it. "
+                     "Run triage with --app-repo to have each name checked.")
+        elif mine:
+            means = (f"{mine} of these {len(names)} names "
+                     f"{'leads' if mine == 1 else 'lead'} into the app's own code and "
+                     f"{'is' if mine == 1 else 'are'} marked. The others were not found in "
+                     f"the app's source, so they are framework or library work the app "
+                     f"triggered.")
+        else:
+            means = (f"None of these {len(names)} names was found in the app's source. They are "
+                     f"framework or system slices: the app caused them but did not write them. "
+                     f"To see your own functions in this list, add trace sections and capture "
+                     f"again.")
         parts.append(figure("Where the time was spent, by self time",
                             "Self time is the time inside a slice itself, with the slices nested "
                             "under it taken out. It is the fairest ranking of what cost the most.",
-                            bar_chart(rows, "Slices by self time"),
-                            "A name here that does not appear anywhere in the app's source is a "
-                            "framework or system slice. The app caused it but did not write it.",
+                            bar_chart(rows, "Slices by self time") + evidence(names),
+                            means,
                             "Press / and search for a slice name to jump to it."))
 
     calls = read_csv(out_dir, "30_binder_main_thread")
@@ -953,6 +989,10 @@ figcaption .how,.how{color:var(--muted);font-size:14px;margin:0 0 10px}
 .bar-fill{display:block;height:100%;min-width:2px;background:var(--accent);border-radius:3px}
 .bar-val{white-space:nowrap;font-variant-numeric:tabular-nums;font-weight:600}
 .bar-val i{font-style:normal;font-weight:400;color:var(--plot-muted);margin-left:6px}
+.own{display:inline-block;font:700 11px/1.5 var(--font);letter-spacing:.02em;background:var(--accent);color:var(--on-accent);border-radius:999px;padding:0 7px;margin-right:6px;vertical-align:1px;white-space:nowrap}
+.evidence{list-style:none;margin:10px 0 0;padding:0;display:grid;gap:6px;font-size:13px;color:var(--muted)}
+.evidence li{overflow-wrap:anywhere}
+.means .tag{margin-right:6px}
 .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin:0 0 4px}
 .tile{border:1px solid var(--border);border-radius:calc(var(--radius) * .6);padding:12px 14px}
 .tile b{display:block;font-size:24px;line-height:1.2;font-variant-numeric:tabular-nums}
@@ -1006,19 +1046,25 @@ def css_vars(v: dict) -> str:
             f"@media (prefers-color-scheme:dark){{:root{{{block(v['dark'])}}}}}")
 
 
-def render(out_dir: str, theme: dict | None = None) -> str:
+def render(out_dir: str, theme: dict | None = None, code_map: dict | None = None,
+           extra_findings: list | None = None) -> str:
     """The whole page as a string. Raises only if findings.json is unreadable."""
     with open(os.path.join(out_dir, "findings.json")) as fh:
         data = json.load(fh)
     pkg = data.get("pkg") or "*"
     hs = data.get("health_status")
     findings = data.get("findings") or []
+    if extra_findings:
+        order = {"blocker": 0, "high": 1, "medium": 2, "info": 3}
+        findings = sorted(findings + list(extra_findings),
+                          key=lambda x: order.get(x.get("severity"), 9))
     for i, f in enumerate(findings, 1):
         f["_n"] = i
     by_section: dict[str, list[dict]] = {}
     for f in findings:
         by_section.setdefault(section_of(f), []).append(f)
     vars_, notes = resolve_theme(theme)
+    cm = data.get("code_map") or code_map
 
     index = ""
     if findings:
@@ -1049,7 +1095,7 @@ def render(out_dir: str, theme: dict | None = None) -> str:
                 "Every frame has a deadline. The frame timeline says whether the app or the "
                 "system compositor missed it.", q3_frames(out_dir, pkg, hs)),
         section(4, "q4", "Where did the time go?",
-                "Only now is it worth ranking slices.", q4_time(out_dir, pkg, hs)),
+                "Only now is it worth ranking slices.", q4_time(out_dir, pkg, hs, cm)),
     ]
 
     trace = os.path.basename(str(data.get("trace", "")))
@@ -1068,6 +1114,9 @@ def render(out_dir: str, theme: dict | None = None) -> str:
     else:
         themed = "Neutral theme. Pass --app-repo to use the app's own colours."
     foot = [f"<p>{themed}</p>"] + [f"<p>{esc(n)}.</p>" for n in notes]
+    foot.append("<p>Charts and numbers are measured from the trace. Lines marked "
+                "<span class=\"tag\">inference</span> are this tool's reading of them, and a "
+                "reading can be wrong.</p>")
     foot.append("<p>Thread state and frame colours follow the Perfetto UI, so this page and the "
                 "trace viewer read the same way. Charts are drawn from the query results in "
                 "<code>csv/</code>. The full tables are in <code>report.md</code>.</p>")
@@ -1089,7 +1138,22 @@ def write(out_dir: str, app_repo: str | None = None, theme_file: str | None = No
             theme = json.load(fh)
     elif app_repo:
         theme = discover_theme(app_repo)
-    page = render(out_dir, theme)
+    code_map, extra = None, None
+    if app_repo:
+        try:
+            with open(os.path.join(out_dir, "findings.json")) as fh:
+                stored = json.load(fh)
+            if not stored.get("code_map"):
+                import importlib.util
+                spec = importlib.util.spec_from_file_location(
+                    "code_map", os.path.join(os.path.dirname(os.path.abspath(__file__)), "code_map.py"))
+                cmod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(cmod)
+                code_map = cmod.build(cmod.load_results(out_dir), app_repo, stored.get("pkg") or "")
+                extra = cmod.findings(code_map)
+        except Exception:  # the ownership marks are optional
+            code_map, extra = None, None
+    page = render(out_dir, theme, code_map, extra)
     dest = dest or os.path.join(out_dir, "report.html")
     with open(dest, "w", encoding="utf-8") as fh:
         fh.write(page)
