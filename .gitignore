@@ -1,1 +1,2 @@
 perfetto-triage-eval/fixtures/*/.sql/
+__pycache__/

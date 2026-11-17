@@ -52,6 +52,10 @@ scripts/capture.sh com.example.app                  # cold start
 scripts/capture.sh com.example.app --interactive 20 # you drive; captures jank
 ```
 
+`capture.sh` checks the package flags first and exits 3 on a `debuggable`
+build. Do not work around that by default: get a release-like build. If debug
+is truly all there is, `--allow-debug` captures it and the report flags it.
+
 This pushes `assets/startup_jank.pbtxt` to the device. Use that config, not the
 lightweight `adb shell perfetto <categories>` form: the lightweight form cannot
 enable `android.surfaceflinger.frametimeline`, so you get no jank attribution
@@ -103,12 +107,35 @@ python3 scripts/triage.py trace.pftrace --pkg com.example.app --out triage-out
 It parses the trace once into a warm `trace_processor` session, runs the query
 pack in `queries/`, and writes:
 
-- `triage-out/report.md` — findings worst-first, then the evidence tables
-- `triage-out/findings.json` — the same findings, machine-readable
+- `triage-out/report.md` — Trust check, findings worst-first, then the evidence tables
+- `triage-out/findings.json` — a `health_status` block plus the same findings, machine-readable
 - `triage-out/csv/*.csv` — every raw result
 
-Read `report.md` before doing anything else. The findings are already ordered
-by severity and each one carries a concrete next action.
+Read the **Trust check** at the top of `report.md` before anything else. It is
+question 1, answered explicitly, and mirrored in `findings.json`:
+
+| `health_status` field | Values | Meaning |
+|---|---|---|
+| `trace_health` | `pass` / `fail` / `unknown` | `00_health`: zero error rows is the pass case |
+| `coverage.<source>` | `ok` / `missing` / `unknown` | `01_coverage`: zero means never recorded |
+| `build_type` | `release` / `debuggable` / `unknown` | read from `package_list` in the trace |
+| `startup_capture` | `ok` / `missed` / `not_expected` / `unknown` | did a startup capture contain the launch |
+| `verdict` | `trusted` / `directional_only` / `not_trustworthy` | what you may do with the numbers |
+
+`unknown` means the check did not run or could not decide. Never read it as
+pass. Act on the verdict:
+
+- `trusted`: report numbers, with device, build type and run count.
+- `directional_only`: findings carry `directional_only: true`. Say where the
+  time goes; do not quote how much. Say why (the `reasons` list).
+- `not_trustworthy`: stop and fix the capture.
+
+If the trace was not named by `capture.sh`, pass `--mode startup` or
+`--mode interactive` so a startup capture with no launch is reported as a
+failed capture instead of an empty startup section.
+
+Then read the findings. They are ordered by severity and each one carries a
+concrete next action.
 
 To ask a question the pack does not cover, write SQL directly — see
 `references/sql-cookbook.md` for the schema and the idioms that matter:
@@ -158,9 +185,11 @@ python3 scripts/triage.py after.pftrace --pkg com.example.app --out after-out
 python3 scripts/remeasure.py before-out after-out
 ```
 
-`remeasure.py` prints what resolved, what's new, what's still present, the
-jank-summary numbers side by side, and the top self-time hotspots side by
-side. It does not compute a single "% improvement" verdict on purpose — a
+`remeasure.py` prints the trust verdict of each side first, and warns if the
+two build types differ or either side is not `trusted`. Then what resolved,
+what's new, what's still present, the jank-summary numbers side by side, and
+the top self-time hotspots side by side. It does not compute a single
+"% improvement" verdict on purpose — a
 single number invites picking the flattering run out of ten, which is
 exactly what the next paragraph exists to prevent.
 
@@ -187,9 +216,12 @@ Never report a number without the device, the build type, and the run count.
 - Do not present a number you did not measure in this session. If a step was
   skipped, say which and why.
 - Do not analyse a `debuggable` build and report the numbers as real.
+  `health_status.build_type` must be `release` before any number is quoted;
+  `unknown` is not `release`.
 - Do not compare runs across different devices, thermal states, or build types.
-- Empty result ≠ healthy app. Check `00_health` and `01_coverage` first — an
-  empty jank table usually means FrameTimeline was never recorded.
+- Empty result ≠ healthy app. Read `health_status` first: an empty `00_health`
+  is `trace_health: pass`, a zero in `01_coverage` is `missing`, and an empty
+  startup section on a startup capture is `startup_capture: missed`.
 - If the trace does not contain the interaction the user cares about, recapture.
   Do not reinterpret an unrelated trace to fit the question.
 

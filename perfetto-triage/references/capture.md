@@ -43,8 +43,12 @@ Check what you actually have:
 adb shell getprop ro.build.version.sdk        # API level
 adb shell getprop ro.product.model
 adb shell dumpsys thermalservice | head -20   # throttling status
-adb shell dumpsys package <pkg> | grep -i debuggable
+adb shell dumpsys package <pkg> | grep -i debuggable   # any output = debuggable
 ```
+
+`scripts/capture.sh` runs the debuggable check itself and exits 3 if the build
+is debuggable (`--allow-debug` overrides). `triage.py` checks again from the
+trace's `package_list`, so a trace captured another way is still covered.
 
 ## What to record
 

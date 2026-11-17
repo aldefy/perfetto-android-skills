@@ -9,7 +9,8 @@ the questions a senior engineer asks when a trace lands on their desk.
 
 Outputs into --out (default ./triage-out):
   report.md      human-readable report, one section per question
-  findings.json  machine-readable verdicts, for an agent to act on
+  findings.json  machine-readable verdicts plus a health_status block, for an
+                 agent to act on
   csv/*.csv      raw result of every query
 
 No third-party dependencies. Downloads trace_processor on first run.
@@ -189,9 +190,131 @@ def leading_comment(sql_path: str) -> str:
 # the checklist: turn tables into verdicts
 # --------------------------------------------------------------------------
 
-def analyse(results: dict, pkg: str) -> list[dict]:
+COVERAGE_COLUMNS = [
+    # (01_coverage column, key in health_status["coverage"])
+    ("slices", "slices"),
+    ("sched_rows", "sched"),
+    ("frametimeline_rows", "frametimeline"),
+    ("blocked_reason_rows", "blocked_reasons"),
+    ("binder_slices", "binder"),
+]
+
+
+def infer_mode(trace_path: str) -> str:
+    """capture.sh names traces <pkg>-<mode>-<stamp>.pftrace. Anything else is
+    'unknown': we do not guess what the person meant to capture."""
+    base = os.path.basename(trace_path or "")
+    if "-startup-" in base:
+        return "startup"
+    if "-interactive-" in base:
+        return "interactive"
+    return "unknown"
+
+
+def health_status(results: dict, pkg: str, mode: str = "unknown") -> dict:
+    """Explicit pass/fail for the trust checks, so a reader never has to infer
+    'healthy' from the absence of a finding.
+
+    Every value is a closed set. 'unknown' always means the check did not run
+    or could not decide. It never means the check passed.
+
+      trace_health     pass | fail | unknown        (00_health: zero rows = pass)
+      coverage.<src>   ok | missing | unknown       (01_coverage: zero = missing)
+      build_type       release | debuggable | unknown   (03_build_type)
+      startup_capture  ok | missed | not_expected | unknown   (10_startup_summary)
+      verdict          trusted | directional_only | not_trustworthy
+    """
+    def table(stem):
+        h, r = results.get(stem, ([], []))
+        return as_dicts(h, r)
+
+    hs = {"mode": mode}
+    reasons = []
+
+    # 00_health: an EMPTY result is the good case.
+    if "00_health" not in results:
+        hs["trace_health"] = "unknown"
+        reasons.append("00_health did not run")
+    elif table("00_health"):
+        hs["trace_health"] = "fail"
+        reasons.append("trace_processor reported errors or dropped data")
+    else:
+        hs["trace_health"] = "pass"
+
+    # 01_coverage: a ZERO in a column is the bad case.
+    cov = table("01_coverage")
+    hs["coverage"] = {}
+    for col, key in COVERAGE_COLUMNS:
+        if not cov or col not in cov[0]:
+            hs["coverage"][key] = "unknown"
+        else:
+            hs["coverage"][key] = "ok" if (num(cov[0].get(col)) or 0) > 0 else "missing"
+    if not cov:
+        reasons.append("01_coverage did not run")
+    # Gaps scope what the trace can answer. Only sched/slices decide the verdict.
+    hs["coverage_gaps"] = [k for k, v in hs["coverage"].items() if v == "missing"]
+
+    # 03_build_type: needs a named package. With --pkg '*' every package on the
+    # device matches, and "is the app under test debuggable" has no answer.
+    hs["build_type"] = "unknown"
+    builds = table("03_build_type")
+    if "03_build_type" not in results:
+        hs["build_type_detail"] = "03_build_type did not run on this trace"
+    elif pkg in ("*", ""):
+        hs["build_type_detail"] = "no package named; pass --pkg to check the build type"
+    elif not builds:
+        hs["build_type_detail"] = ("package_list has no row for this package "
+                                   "(android.packages_list data source missing?)")
+    else:
+        dbg = [r.get("package_name", "?") for r in builds
+               if str(r.get("debuggable", "")).strip().lower() in ("1", "true")]
+        if dbg:
+            hs["build_type"] = "debuggable"
+            hs["build_type_detail"] = "debuggable=1 for " + ", ".join(dbg[:5])
+        else:
+            hs["build_type"] = "release"
+            hs["build_type_detail"] = "debuggable=0 for " + ", ".join(
+                r.get("package_name", "?") for r in builds[:5])
+    if hs["build_type"] == "debuggable":
+        reasons.append("debuggable build")
+    elif hs["build_type"] == "unknown":
+        reasons.append("build type not verified")
+
+    # 10_startup_summary: zero rows is only a failure when a launch was expected.
+    if "10_startup_summary" not in results:
+        hs["startup_capture"] = "unknown"
+    else:
+        launches = [r for r in table("10_startup_summary")
+                    if pkg in ("*", "") or _glob(r.get("package", ""), pkg)]
+        if launches:
+            hs["startup_capture"] = "ok"
+        elif mode == "startup":
+            hs["startup_capture"] = "missed"
+            reasons.append("startup capture missed the app launch")
+        elif mode == "interactive":
+            hs["startup_capture"] = "not_expected"
+        else:
+            hs["startup_capture"] = "unknown"
+
+    core_missing = [k for k in ("sched", "slices") if hs["coverage"].get(k) == "missing"]
+    if core_missing:
+        reasons.append("no data for: " + ", ".join(core_missing))
+    if hs["trace_health"] == "fail" or core_missing:
+        hs["verdict"] = "not_trustworthy"
+    elif (hs["build_type"] != "release" or hs["trace_health"] == "unknown"
+          or not cov or hs["startup_capture"] == "missed"):
+        hs["verdict"] = "directional_only"
+    else:
+        hs["verdict"] = "trusted"
+    hs["reasons"] = reasons
+    return hs
+
+
+def analyse(results: dict, pkg: str, mode: str = "unknown",
+            status: dict | None = None) -> list[dict]:
     """results: {query_stem: (header, rows)}. Returns ordered findings."""
     f = []
+    hs = status if status is not None else health_status(results, pkg, mode)
 
     def add(severity, area, title, detail, action):
         f.append({"severity": severity, "area": area, "title": title,
@@ -209,6 +332,22 @@ def analyse(results: dict, pkg: str) -> list[dict]:
             f"trace_processor stats reported: {names}",
             "Re-record with a bigger buffer (-b 256mb) or a shorter duration. "
             "Numbers from a lossy trace are not comparable across runs.")
+
+    if hs["build_type"] == "debuggable":
+        add("blocker", "trace", "Debuggable build: every timing here is directional only",
+            f"package_list reports {hs['build_type_detail']}. A debuggable build "
+            "runs 2 to 5x slower than release, with JIT and ART checks that release "
+            "users never pay for.",
+            "Install a release or release-like (non-debuggable) build and recapture "
+            "before reporting any number from this trace. The findings below still "
+            "point at real code paths, but their sizes are not real.")
+    elif hs["build_type"] == "unknown":
+        add("info", "trace", "Build type not verified",
+            f"{hs['build_type_detail']}. This report cannot tell whether the app "
+            "was a release build.",
+            "Run `adb shell dumpsys package <pkg> | grep -i debuggable` (any output "
+            "means debuggable), or recapture with scripts/capture.sh, which refuses "
+            "debuggable builds unless told otherwise.")
 
     cov = table("01_coverage")
     if cov:
@@ -228,6 +367,26 @@ def analyse(results: dict, pkg: str) -> list[dict]:
             add("blocker", "trace", "No scheduler data",
                 "The sched table is empty, so running-vs-waiting cannot be answered.",
                 "Add ftrace events sched/sched_switch and sched/sched_waking.")
+
+    # --- 0b. Did a startup capture actually contain the launch? -----------
+    if hs["startup_capture"] == "missed":
+        rest = ("the rest of the trace is populated (scheduler and slice data "
+                "present), so the capture window did not line up with the launch"
+                if hs["coverage"].get("sched") == "ok" and hs["coverage"].get("slices") == "ok"
+                else "core data sources are missing too, so the capture itself is broken")
+        add("blocker", "startup", "Startup capture missed the app launch",
+            f"android_startups has no launch for this package, and {rest}. "
+            "This is a failed measurement, not a healthy startup.",
+            "Recapture. If it repeats, lengthen the delay between starting the "
+            "trace and force-stopping the app in scripts/capture.sh. Do not read "
+            "the absence of startup findings as 'startup is fine'.")
+    elif hs["startup_capture"] == "unknown" and "10_startup_summary" in results:
+        add("info", "startup", "No app launch found in this trace",
+            "android_startups has no launch for this package, and the capture mode "
+            "is not known, so this may or may not be expected.",
+            "If this was meant to be a cold-start capture, the launch was missed: "
+            "recapture. If you were measuring scrolling or another interaction, "
+            "pass --mode interactive to say so.")
 
     # --- 1. Startup -------------------------------------------------------
     startups = [r for r in table("10_startup_summary")
@@ -436,7 +595,46 @@ def analyse(results: dict, pkg: str) -> list[dict]:
 
     order = {"blocker": 0, "high": 1, "medium": 2, "info": 3}
     f.sort(key=lambda x: order.get(x["severity"], 9))
+    # Every finding says whether its numbers can be quoted. Trust findings
+    # (area "trace") describe the capture itself, so they are never directional.
+    for x in f:
+        x["directional_only"] = hs["verdict"] != "trusted" and x["area"] != "trace"
     return f
+
+
+def trust_table(hs: dict) -> list[str]:
+    """The 'Trust check' block at the top of report.md."""
+    mark = {"pass": "PASS", "ok": "PASS", "release": "PASS", "trusted": "PASS",
+            "fail": "FAIL", "missing": "FAIL", "debuggable": "FAIL", "missed": "FAIL",
+            "not_trustworthy": "FAIL", "directional_only": "CAUTION",
+            "not_expected": "n/a"}
+    rows = [("Trace health (`00_health`)", hs["trace_health"],
+             "zero error rows is the pass case")]
+    for key, val in hs["coverage"].items():
+        rows.append((f"Coverage: {key} (`01_coverage`)", val,
+                     "zero rows means that data source was never recorded"))
+    rows.append(("Build type (`03_build_type`)", hs["build_type"],
+                 hs.get("build_type_detail", "")))
+    rows.append(("Startup capture (`10_startup_summary`)", hs["startup_capture"],
+                 f"capture mode: {hs['mode']}"))
+    out = ["| Check | Result | Status | Note |", "|---|---|---|---|"]
+    for name, val, note in rows:
+        out.append(f"| {name} | {mark.get(val, 'UNKNOWN')} | `{val}` | {note} |")
+    out.append("")
+    verdict = {"trusted": "**Verdict: trusted.** Numbers below can be quoted with "
+                          "the device, build type and run count.",
+               "directional_only": "**Verdict: directional only.** The findings point "
+                                   "at real code paths, but do not quote the numbers.",
+               "not_trustworthy": "**Verdict: not trustworthy.** Fix the capture "
+                                  "before reading anything below."}[hs["verdict"]]
+    out.append(verdict)
+    if hs["reasons"]:
+        out.append("")
+        out.append("Why: " + "; ".join(hs["reasons"]) + ".")
+    if hs.get("coverage_gaps"):
+        out.append("")
+        out.append("Not answerable from this trace: " + ", ".join(hs["coverage_gaps"]) + ".")
+    return out
 
 
 def _glob(value: str, pattern: str) -> bool:
@@ -449,7 +647,8 @@ def _glob(value: str, pattern: str) -> bool:
 # --------------------------------------------------------------------------
 
 SECTIONS = [
-    ("Is this trace trustworthy?", ["00_health", "01_coverage", "02_processes"]),
+    ("Is this trace trustworthy?",
+     ["00_health", "01_coverage", "02_processes", "03_build_type"]),
     ("Startup: where does cold start time go?",
      ["10_startup_summary", "11_startup_breakdown", "12_startup_main_thread_state",
       "13_startup_top_slices", "14_startup_class_loading", "15_startup_binder"]),
@@ -472,7 +671,13 @@ def main():
     ap.add_argument("--tp", default=None, help="path to trace_processor_shell")
     ap.add_argument("--only", default=None,
                     help="comma-separated query stems or prefixes, e.g. 10,20")
+    ap.add_argument("--mode", choices=["auto", "startup", "interactive"], default="auto",
+                    help="what the capture was meant to contain. 'auto' reads it from "
+                         "a capture.sh filename (<pkg>-startup-*.pftrace). In startup "
+                         "mode a trace with no app launch is reported as a failed "
+                         "capture instead of silently having no startup findings.")
     args = ap.parse_args()
+    mode = infer_mode(args.trace) if args.mode == "auto" else args.mode
 
     if not os.path.exists(args.trace):
         raise SystemExit(f"no such trace: {args.trace}")
@@ -507,12 +712,18 @@ def main():
                     w.writerows(rows)
             sys.stderr.write(f"[triage] {stem}: {len(rows)} rows\n")
 
-    findings = analyse(results, args.pkg)
+    status = health_status(results, args.pkg, mode)
+    findings = analyse(results, args.pkg, mode, status)
 
     # ---- report.md
     icon = {"blocker": "🛑", "high": "🔴", "medium": "🟠", "info": "🔵"}
     out = [f"# Perfetto triage — `{os.path.basename(args.trace)}`", ""]
-    out.append(f"Package filter: `{args.pkg}`  ·  trace_processor {TP_VERSION}")
+    out.append(f"Package filter: `{args.pkg}`  ·  capture mode: `{mode}`  ·  "
+               f"trace_processor {TP_VERSION}")
+    out.append("")
+    out.append("## Trust check")
+    out.append("")
+    out.extend(trust_table(status))
     out.append("")
     out.append("## Findings, worst first")
     out.append("")
@@ -521,7 +732,8 @@ def main():
                    "trace, or the trace does not cover the interaction you care about.")
     for i, f in enumerate(findings, 1):
         out.append(f"### {i}. {icon.get(f['severity'], '')} {f['title']}")
-        out.append(f"*{f['area']} · {f['severity']}*")
+        tag = " · directional only" if f.get("directional_only") else ""
+        out.append(f"*{f['area']} · {f['severity']}{tag}*")
         out.append("")
         out.append(f["detail"])
         out.append("")
@@ -554,9 +766,12 @@ def main():
     report = os.path.join(args.out, "report.md")
     open(report, "w").write("\n".join(out))
     with open(os.path.join(args.out, "findings.json"), "w") as fh:
-        json.dump({"trace": args.trace, "pkg": args.pkg, "findings": findings}, fh, indent=2)
+        json.dump({"trace": args.trace, "pkg": args.pkg, "mode": mode,
+                   "health_status": status, "findings": findings}, fh, indent=2)
 
-    print(f"\n{len(findings)} finding(s). Report: {report}")
+    print(f"\nTrust: {status['verdict']}"
+          + (f" ({'; '.join(status['reasons'])})" if status["reasons"] else ""))
+    print(f"{len(findings)} finding(s). Report: {report}")
     for f in findings[:8]:
         print(f"  {icon.get(f['severity'], '')} [{f['area']}] {f['title']}")
 
