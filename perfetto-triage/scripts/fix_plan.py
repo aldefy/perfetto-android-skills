@@ -249,6 +249,14 @@ def build(findings: list, health: dict | None = None, code_map: dict | None = No
             item["check"] = [f"late frames inside {section}"] + LATE
             if evidence.get(section):
                 item["where"] = [evidence[section]]
+        if kind == "always_animating":
+            if f.get("animation_phase") == "draw":
+                item["change"][0] = ("Composition tracing will not name it, because nothing "
+                                     "recomposes. Find it by elimination: switch one suspect off, "
+                                     "capture a cold start, and compare the frame count")
+            elif f.get("animation_phase") == "composition":
+                item["change"][0] = ("Capture with composition tracing on: the composable that "
+                                     "recomposes on every frame is then named in the trace")
         if kind == "main_binder":
             m = re.search(r"Main-thread binder: (.+?) costs", f.get("title", ""))
             if m:

@@ -43,14 +43,31 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 OTHER_PLATFORMS = {"iosMain", "jsMain", "wasmJsMain", "desktopMain", "macosMain", "nativeMain",
                    "appleMain", "ios", "macos", "web", "windows", "linux"}
-MAX_PATH_FILES = 80
+MAX_PATH_FILES = 140
+MAX_FIRST_SCREEN_FILES = 60
 MAX_PER_CHECK = 8
 STARTUP_KINDS = ["slow_cold_start", "slow_start", "startup_dominated", "startup_waiting",
                  "startup_compute", "startup_mixed"]
 JANK_KINDS = ["jank_rate", "jank_ui", "jank_split", "layout_cost", "handoff_compose-expert",
               "always_animating"]
 ANIMATION_KINDS = ["always_animating", "handoff_compose-expert", "jank_ui", "jank_rate"]
-DEBUG_ONLY = re.compile(r"(?<![!\w])(?:BuildConfig\.DEBUG|isDebug\w*|isDebuggable\w*|DEBUG_MODE)\b")
+DEBUG_NAME = r"(?:BuildConfig\.DEBUG|isDebug\w*|isDebuggable\w*|DEBUG_MODE)"
+DEBUG_ONLY = re.compile(r"(?<![!\w])" + DEBUG_NAME + r"\b(?!\s*(?:\.not\(\)|==\s*false|!=\s*true))")
+# if (!BuildConfig.DEBUG) return: everything after it in that block is debug-only
+NOT_DEBUG_RETURN = re.compile(r"\bif\s*\(\s*!\s*" + DEBUG_NAME + r"\s*\)\s*(?:\{\s*)?return\b")
+STRINGS_AND_COMMENTS = re.compile(r'"(?:[^"\\\n]|\\.)*"|\'(?:[^\'\\\n]|\\.)\'|//.*')
+UI_FILE = re.compile(r"@Composable|\bCanvas\s*\(|: View\b|\bAnimator\b|Drawable\b")
+DRAW_READER = re.compile(r"\bCanvas\s*\(|drawBehind|drawWithContent|drawWithCache|graphicsLayer\s*\{|"
+                         r"\bdrawIntoCanvas|\.draw(?:Rect|Circle|Line|Path|Arc|Image|RoundRect)\s*\(|"
+                         r"ProgressIndicator\s*\(")
+START_DESTINATION = re.compile(
+    r"\bstart(?:Destination|Key|Route|Screen)\s*=\s*([^\n]+)|"
+    r"rememberNavBackStack\s*\(\s*([A-Z][^\n]*)|"
+    r"\bNavigator\s*\(\s*(?:screen\s*=\s*)?([A-Z]\w*\s*\([^\n]*)|"
+    r"\binitial(?:Route|Destination|Screen)\s*=\s*([^\n]+)")
+NAV_NOISE = {"screen", "screens", "route", "routes", "destination", "destinations", "nav", "graph",
+             "name", "companion", "value", "navigation", "navkey", "key", "if", "else", "when",
+             "true", "false", "null", "it", "this", "remember", "val", "var", "state", "app"}
 # Words in a described flow that are not screen names.
 FLOW_NOISE = {"then", "the", "and", "to", "from", "into", "onto", "via", "with", "after", "before",
               "screen", "screens", "page", "flow", "tab", "tap", "open", "opens", "back", "next",
@@ -134,8 +151,10 @@ CHECKS = [
      "plan": ["startup_compute", "startup_mixed", "startup_waiting"]},
     {"id": "endless_animation", "scope": "path", "repo_fallback": True,
      "kinds": ANIMATION_KINDS,
+     "ui_only": True,
      "pattern": re.compile(r"rememberInfiniteTransition|infiniteRepeatable|withFrameNanos|"
-                           r"withFrameMillis|IterateForever|iterations\s*=\s*Int\.MAX_VALUE|"
+                           r"withFrameMillis|withInfiniteAnimationFrame\w*|\bawaitFrame\s*\(|"
+                           r"IterateForever|iterations\s*=\s*Int\.MAX_VALUE|"
                            r"repeatCount\s*=\s*\w*\.?INFINITE|[Ss]himmer\w*\s*\("),
      "title": "An animation that runs until something stops it",
      "why": "An endless animation recomposes or redraws on every frame for as long as it is "
@@ -143,19 +162,21 @@ CHECKS = [
      "fix": "Run it only while it is visible and needed: take it out of the composition when "
             "loading ends, and stop it when the screen is covered or in the background.",
      "plan": ["always_animating", "handoff_compose-expert", "jank_ui"]},
-    {"id": "redraws_while_shown", "scope": "path", "kinds": ANIMATION_KINDS,
+    # A plain `while (true) { ...; delay(n) }` is not here on purpose: that is a
+    # background loop, and it draws nothing. Frame loops are caught above by the
+    # frame-clock calls they have to make.
+    {"id": "redraws_while_shown", "scope": "path", "kinds": ANIMATION_KINDS, "ui_only": True,
      "pattern": re.compile(
          r"\b(?:Circular|Linear)ProgressIndicator\s*\((?![^)\n]*\bprogress\b)|"
-         r"\bbasicMarquee\s*\(|while\s*\(\s*(?:true|isActive)\s*\)|"
-         r"withInfiniteAnimationFrame\w*|\bLottieAnimation\s*\(|rememberLottieComposition|"
-         r"LottieConstants\.IterateForever|AnimatedImageDrawable|\bGifDecoder\b|"
+         r"\bbasicMarquee\s*\(|\bLottieAnimation\s*\(|rememberLottieComposition|"
+         r"AnimatedImageDrawable|\bGifDecoder\b|"
          r"ImageDecoderDecoder|\.placeholder\s*\([^)\n]*highlight|\bPullToRefreshBox\s*\("),
      "title": "Something that redraws every frame while it is shown",
-     "why": "An indeterminate progress indicator, a marquee, a looping Lottie or animated "
-            "image, or a frame loop draws a new frame every refresh for as long as it is in "
-            "the composition. Left there after loading, it never lets the screen go idle.",
-     "fix": "Check that it leaves the composition when it is no longer needed, and that a "
-            "loop has a real exit. Hiding it with alpha or size zero does not stop it.",
+     "why": "An indeterminate progress indicator, a marquee, or a looping Lottie or animated "
+            "image draws a new frame every refresh for as long as it is in the composition. "
+            "Left there after loading, it never lets the screen go idle.",
+     "fix": "Check that it leaves the composition when it is no longer needed. Hiding it "
+            "with alpha or size zero does not stop it.",
      "plan": ["always_animating", "handoff_compose-expert", "jank_ui"]},
     {"id": "lazy_list_without_key", "scope": "path", "kinds": JANK_KINDS,
      "pattern": re.compile(r"\bitems(?:Indexed)?\s*\((?![^\n]*\bkey\b)"),
@@ -185,8 +206,8 @@ def _android(rel: str) -> bool:
     path = "/" + rel.replace("\\", "/")
     module, _, inside = path.partition("/src/")
     source_set = inside.split("/", 1)[0]
-    if re.search(r"debug$", source_set, re.I):     # src/debug, src/androidDebug: not in a release build
-        return False
+    if re.search(r"debug$|^test|test$", source_set, re.I):
+        return False        # src/debug, src/androidDebug, src/testDemo: not in a release build
     return not (set(path.split("/")) & OTHER_PLATFORMS) and not NOT_THE_APP.search(module)
 
 
@@ -338,7 +359,7 @@ def _squash(text: str) -> str:
     return re.sub(r"[^a-z0-9]", "", text.lower())
 
 
-def match_name(index: dict, key: str) -> list[str]:
+def match_name(index: dict, key: str, loose: bool = True) -> list[str]:
     """Files for one screen name. An exact match wins over a name that only
     starts with it, which wins over one that merely contains it, so "App" finds
     App.kt and not every file with App somewhere in its name."""
@@ -354,7 +375,7 @@ def match_name(index: dict, key: str) -> list[str]:
             starts.extend(rels)
         elif key in low:
             contains.extend(rels)
-    for tier in (exact, starts, contains):
+    for tier in ((exact, starts, contains) if loose else (exact,)):
         hits = [h for h in dict.fromkeys(tier) if _android(h)]
         if hits:
             return hits[:12]
@@ -398,6 +419,50 @@ def match_flow(index: dict, entry: str) -> tuple[list[tuple[str, str]], list[str
         else:
             missed.append(word)
     return found, (missed if found else [entry])
+
+
+def _package(index: dict, rel: str) -> str:
+    m = re.search(r"^\s*package\s+([\w.]+)", _text(index, rel), re.M)
+    return m.group(1) if m else ""
+
+
+def first_screen(index: dict, near: list[str]) -> list[tuple[str, str, str]]:
+    """The screen a cold start lands on: [(file, screen name, declared in)].
+    Read from the navigation set-up: startDestination = ..., a Navigation 3
+    back stack, a Voyager Navigator. `near` are the entry files, used to prefer
+    a declaration in the same package when a repo holds more than one app."""
+    roots = [_package(index, r) for r in near]
+    found = []                      # (closeness, declaring file, expression)
+    for rels in index.get("all_files", {}).values():
+        for rel in rels:
+            if not rel.endswith(".kt") or not _android(rel):
+                continue
+            text = _text(index, rel)
+            if "start" not in text and "Navigator(" not in text \
+                    and "rememberNavBackStack" not in text and "initial" not in text:
+                continue
+            close = max([_shared_segments(_package(index, rel), root) for root in roots] or [0])
+            for m in START_DESTINATION.finditer(STRINGS_AND_COMMENTS.sub(
+                    lambda q: q.group(0) if q.group(0).startswith('"') else "", text)):
+                found.append((close, rel, next(g for g in m.groups() if g)[:120]))
+    if not found:
+        return []
+    best = max(f[0] for f in found)
+    out, seen = [], set()
+    for _, rel, expr in [f for f in found if f[0] == best][:6]:
+        # a screen is named by a type (Routes.Home, HomeScreen()) or a string ("home")
+        head = expr.split(",")[0]
+        words = re.findall(r"\b[A-Z]\w*", re.sub(r'"[^"]*"', "", head)) \
+            + [w for q in re.findall(r'"([^"]*)"', head) for w in re.findall(r"[A-Za-z]\w*", q)]
+        for word in words:
+            name = re.sub(r"(NavKey|Destination|Route|Screen|Graph|Key)$", "", word) or word
+            if name.lower() in NAV_NOISE or len(name) < 3 or name.lower() in seen:
+                continue
+            seen.add(name.lower())
+            for hit in match_name(index, _squash(name), loose=False)[:6]:
+                if "@Composable" in _text(index, hit):
+                    out.append((hit, name, rel))
+    return out
 
 
 def build_path(index: dict, mode: str, flow: list[str] | None, code_map: dict | None,
@@ -490,8 +555,42 @@ def build_path(index: dict, mode: str, flow: list[str] | None, code_map: dict | 
         how.append("No slice in the trace names an app class or one of its trace sections, so "
                    "the trace itself does not say which screens ran.")
 
+    # The first screen. A cold start ends on the navigation graph's start
+    # destination, and that screen's own tree is where a slow first frame or an
+    # animation that never stops lives. It is followed before anything else,
+    # because the entry files of a large app refer to more files than fit.
+    landing = first_screen(index, [rel for rel, _ in entry]) if entry else []
+    opened = []
+    for rel, name, declared in landing:
+        role = f"first screen: {name}"
+        if add(rel, role, 0, seed=True):
+            opened.append(rel)
+            files[rel]["first"] = True
+        elif rel in files and "first screen" not in files[rel]["role"]:
+            files[rel]["role"] += ", " + role
+            files[rel]["first"] = True
+    if landing:
+        names = ", ".join(dict.fromkeys(name for _, name, _ in landing))
+        frontier, tree = [rel for rel, _, _ in landing], 0
+        for depth in (1, 2, 3):
+            nxt = []
+            for rel in frontier:
+                for ref in _refs(index, rel):
+                    if tree >= MAX_FIRST_SCREEN_FILES or not UI_FILE.search(_text(index, ref)):
+                        continue
+                    if add(ref, f"in the first screen's tree, {depth} step{'' if depth == 1 else 's'} "
+                                f"from {os.path.basename(rel)}", depth):
+                        files[ref]["first"] = True
+                        nxt.append(ref)
+                        tree += 1
+            frontier = nxt
+        how.append(f"First screen: {names}, read from the navigation set-up in "
+                   f"{os.path.basename(landing[0][2])}. {tree} more UI file{'' if tree == 1 else 's'} "
+                   f"in its tree, up to three steps in.")
+
     # What the entry files refer to, two steps out. A reference is not proof the
     # code ran, so each file keeps how far it is from an entry point.
+    before = len(files)
     frontier = [rel for rel, meta in files.items() if meta["seed"]]
     for depth in (1, 2):
         nxt = []
@@ -503,7 +602,7 @@ def build_path(index: dict, mode: str, flow: list[str] | None, code_map: dict | 
                 if add(ref, label, depth):
                     nxt.append(ref)
         frontier = nxt
-    reached = sum(1 for m in files.values() if not m["seed"])
+    reached = len(files) - before
     if reached:
         how.append(f"{reached} more file{'' if reached == 1 else 's'} that those refer to, up to "
                    f"two steps out. A reference is not proof the code ran.")
@@ -519,9 +618,82 @@ def build_path(index: dict, mode: str, flow: list[str] | None, code_map: dict | 
 # the audit
 # --------------------------------------------------------------------------
 
+def _condition_only(line: str) -> bool:
+    """True for `if (cond)` with nothing after the closing bracket, so the
+    statement it guards is on the next line."""
+    start = line.find("(")
+    if start < 0:
+        return False
+    depth = 0
+    for pos in range(start, len(line)):
+        depth += line[pos] == "("
+        depth -= line[pos] == ")"
+        if depth == 0:
+            return not line[pos + 1:].strip()
+    return False
+
+
+def debug_lines(text: str) -> set[int]:
+    """Line numbers (from 0) that only run in a debug build: inside a block
+    opened by a debug check, after `if (!DEBUG) return`, on a single-line debug
+    `if`, or inside a private function that is only called from such lines."""
+    lines = text.split("\n")
+    code = [STRINGS_AND_COMMENTS.sub("", line) for line in lines]
+    marked: set[int] = set()
+    depth, stack = 0, []           # stack: brace depth at which a debug region ends
+    carry = False                  # a guard with no brace and no statement: the next line
+    for i, line in enumerate(code):
+        guard = bool(DEBUG_ONLY.search(line)) and bool(re.search(r"\b(?:if|when|while)\b|&&", line))
+        if stack or guard or carry:
+            marked.add(i)
+        carry = guard and "{" not in line and _condition_only(line)
+        pending = guard
+        for ch in line:
+            if ch == "{":
+                depth += 1
+                if pending:
+                    stack.append(depth)
+                    pending = False
+            elif ch == "}":
+                if stack and stack[-1] == depth:
+                    stack.pop()
+                depth -= 1
+        if NOT_DEBUG_RETURN.search(line) and depth > 0:
+            stack.append(depth)
+    # private functions reached only from debug-only lines
+    for _ in range(2):
+        for i, line in enumerate(code):
+            m = re.search(r"\bprivate\s+(?:suspend\s+)?fun\s+(?:<[^>]*>\s*)?(\w+)\s*\(", line)
+            if not m or i in marked:
+                continue
+            calls = [j for j, other in enumerate(code)
+                     if j != i and re.search(r"(?<![\w.])" + re.escape(m.group(1)) + r"\s*\(", other)]
+            if not calls or not all(j in marked for j in calls):
+                continue
+            depth2, started = 0, False
+            for j in range(i, len(code)):
+                depth2 += code[j].count("{") - code[j].count("}")
+                started = started or "{" in code[j]
+                marked.add(j)
+                if started and depth2 <= 0:
+                    break
+    return marked
+
+
+def _debug(index: dict, rel: str) -> set[int]:
+    cache = index.setdefault("_debug", {})
+    if rel not in cache:
+        cache[rel] = debug_lines(_text(index, rel))
+    return cache[rel]
+
+
 def _scan(index: dict, rel: str, check: dict) -> list[dict]:
     hits = []
-    lines = _text(index, rel).split("\n")
+    text = _text(index, rel)
+    if check.get("ui_only") and not UI_FILE.search(text):
+        return hits                 # a ViewModel or a data class draws nothing
+    lines = text.split("\n")
+    debug = _debug(index, rel)
     in_block_comment = False
     for i, line in enumerate(lines):
         stripped = line.strip()
@@ -543,21 +715,11 @@ def _scan(index: dict, rel: str, check: dict) -> list[dict]:
             if re.search(r"\bkey\s*=", following):
                 continue
         hit = {"file": rel, "line": i + 1, "code": redact(stripped), "match": m.group(0)[:60]}
-        # Debug-only when the check is on the same line, or opens a block just
-        # above that has not closed yet. `if (DEBUG) x()` on the line before
-        # says nothing about this line.
-        guarded = bool(DEBUG_ONLY.search(stripped))
-        for back in range(1, 4):
-            if guarded or i - back < 0:
-                break
-            above = lines[i - back].strip()
-            if above.startswith("}"):
-                break
-            guarded = bool(DEBUG_ONLY.search(above)) and above.endswith("{")
-        if guarded:
+        if i in debug:
             hit["debug_only"] = True
-            hit["note"] = ("Guarded by a debug check, so it should not run in a release "
-                           "build. Confirm, then drop it.")
+        if check.get("ui_only"):
+            near = " ".join(lines[max(0, i - 25):i + 26])
+            hit["draws"] = bool(DRAW_READER.search(near))
         before = " ".join(lines[max(0, i - 6):i + 1])
         if check["id"] in ("blocking_call", "system_call", "telephony_call",
                            "disk_or_parse_on_start") and "note" not in hit and OFF_MAIN.search(before):
@@ -719,8 +881,11 @@ def repo_checks(index: dict, kinds: set, mode: str, path: dict) -> list[dict]:
 
 def audit(index: dict, findings: list, mode: str = "unknown", flow: list[str] | None = None,
           code_map: dict | None = None, binder_servers: list[str] | None = None,
-          pkg: str = "", trace_names: list[str] | None = None) -> dict:
-    """findings as triage.py makes them -> the audit. Never raises on odd input."""
+          pkg: str = "", trace_names: list[str] | None = None,
+          debug_build: bool = False) -> dict:
+    """findings as triage.py makes them -> the audit. Never raises on odd input.
+    debug_build: the capture was of a debuggable build, so code behind a debug
+    check did run and is kept."""
     by_kind = {}
     for f in findings or []:
         by_kind.setdefault(f.get("kind") or "other", f)
@@ -729,7 +894,11 @@ def audit(index: dict, findings: list, mode: str = "unknown", flow: list[str] | 
     files = path["files"]
     seeds = [r for r, m in files.items() if m["seed"]]
     order = sorted(files, key=lambda r: (files[r]["depth"], not files[r]["seed"]))
-    items, clean = [], []
+    items, clean, skipped = [], [], []
+    # "draw": frames were drawn with almost no recomposition, so the animated
+    # value is read in a draw block. Candidates near one fit the trace best.
+    phase = (by_kind.get("always_animating") or {}).get("animation_phase")
+    homes = [_package(index, r) for r in seeds]
 
     for check in CHECKS:
         relevant = next((k for k in check["kinds"] if k in kinds), None)
@@ -743,28 +912,47 @@ def audit(index: dict, findings: list, mode: str = "unknown", flow: list[str] | 
             for h in _scan(index, rel, check):
                 h["on_path"] = files[rel]["role"]
                 hits.append(h)
+        if not debug_build:
+            skipped += [h for h in hits if h.get("debug_only")]
+            hits = [h for h in hits if not h.get("debug_only")]
         widened = False
         if not hits and check.get("repo_fallback") and relevant:
             for group in index.get("all_files", {}).values():
-                for rel in group:
+                for rel in dict.fromkeys(group):
                     if rel in files or not _android(rel) or not rel.endswith((".kt", ".java")):
                         continue
                     for h in _scan(index, rel, check):
+                        if h.get("debug_only") and not debug_build:
+                            continue
                         h["on_path"] = "elsewhere in the repo, not known to be on the path"
+                        # code in the entry points' own package first: a repo can hold two apps
+                        h["_far"] = -max([_shared_segments(_package(index, rel), home)
+                                          for home in homes] or [0])
                         hits.append(h)
             widened = True
         if not hits:
             clean.append(check["title"])
             continue
-        # likely-on-main first, then nearest to an entry point
-        hits.sort(key=lambda h: (bool(h.get("debug_only")), "note" in h,
-                                 files.get(h["file"], {"depth": 9})["depth"]))
-        for h in hits[:MAX_PER_CHECK]:
+        if check.get("ui_only") and phase == "draw":
+            for h in hits:
+                if h.get("draws"):
+                    h["note"] = ("Its value is used in a draw block close by. That fits the "
+                                 "trace: frames were drawn with almost no recomposition.")
+        # the first screen's tree, then likely-on-main, then nearest to an entry point
+        hits.sort(key=lambda h: (
+            h.get("_far", -99),
+            not files.get(h["file"], {}).get("first", False) if check.get("ui_only") else False,
+            not h.get("draws", False) if check.get("ui_only") and phase == "draw" else False,
+            "off the main thread" in h.get("note", ""),
+            files.get(h["file"], {"depth": 9})["depth"]))
+        limit = 5 if widened else MAX_PER_CHECK
+        hits = [dict({k: v for k, v in h.items() if not k.startswith("_")}) for h in hits]
+        for h in hits[:limit]:
             items.append({"check": check["id"], "title": check["title"], **h,
                           "why": check["why"], "fix": check["fix"], "plan": check["plan"],
                           "kind": relevant})
-        if len(hits) > MAX_PER_CHECK:
-            items[-1]["more"] = len(hits) - MAX_PER_CHECK
+        if len(hits) > limit:
+            items[-1]["more"] = len(hits) - limit
         if widened:
             items[-1]["widened"] = True
 
@@ -798,6 +986,8 @@ def audit(index: dict, findings: list, mode: str = "unknown", flow: list[str] | 
                            for r in order],
                  "capped": path["capped"]},
         "items": items, "clean": clean,
+        "skipped_debug": [{"file": h["file"], "line": h["line"], "code": h["code"]}
+                          for h in skipped[:20]],
         "limits": "Pattern matches in source. They cannot see which thread a line runs on, or "
                   "whether it ran in this capture. Read each one before acting on it.",
     }
@@ -836,6 +1026,10 @@ def to_markdown(a: dict, heading: str = "## Code on the profiled path") -> str:
         if it.get("more"):
             out.append(f"  - {it['more']} more matches of this kind are not listed.")
     out.append("")
+    if a.get("skipped_debug"):
+        out.append("Left out because they sit behind a debug check and do not run in a release "
+                   "build: " + ", ".join(f"`{h['file']}:{h['line']}`" for h in a["skipped_debug"]) + ".")
+        out.append("")
     if a.get("clean"):
         out.append("Looked for and not found on the path: " + "; ".join(
             t[0].lower() + t[1:] for t in a["clean"]) + ".")

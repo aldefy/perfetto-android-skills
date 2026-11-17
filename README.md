@@ -26,7 +26,7 @@ perfetto-triage/
     fix_plan.py                turns the findings into suggested fixes, in order, for an agent to review
     remeasure.py                before against after: one run each, or many runs each with medians and a noise verdict
     ab_startup.sh               adb-only before/after harness when a benchmark module is out of scope
-  queries/                    20 PerfettoSQL files, 00_health.sql through 41_anrs.sql
+  queries/                    21 PerfettoSQL files, 00_health.sql through 42_frame_phases.sql
     on_demand/                 run only with --app-repo: late frames by the app's own trace sections, and which app code the trace names
   references/
     reading-a-trace.md         the human mental model: what a track/slice/timeline actually means
@@ -67,7 +67,7 @@ perfetto-triage/scripts/capture.sh com.example.app --interactive 20 # you drive,
 perfetto-triage/scripts/capture.sh com.example.app --start          # a flow of unknown length:
 perfetto-triage/scripts/capture.sh com.example.app --stop           # start, run it, stop
 
-# 2. triage — parses once, runs all 20 queries, writes a ranked report
+# 2. triage — parses once, runs all 21 queries, writes a ranked report
 python3 perfetto-triage/scripts/triage.py trace.pftrace --pkg com.example.app --out triage-out
 
 #    it prints its progress as it goes, and triage-out/report.html is a live status page until it finishes
@@ -277,7 +277,7 @@ We have not verified a specific install path for these yet.
 ## Other Perfetto skills
 
 `perfetto-triage` is a small fixed first pass for startup, jank and binder:
-the same 20 queries and the same report every run, a capture that refuses a
+the same 21 queries and the same report every run, a capture that refuses a
 build it cannot trust, and a re-measure step after the fix.
 
 There are other good skills in this space. Pick by the job:

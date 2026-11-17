@@ -410,6 +410,27 @@ def drawing_for_seconds_after_a_cold_start_with_no_input_is_a_finding():
 
 
 @case
+def the_frame_stages_say_where_an_always_on_animation_is_read():
+    def stages(recomposed):
+        r = base()
+        r["20_jank_summary"] = (["process_name", "frames", "janky", "janky_pct", "app_jank",
+                                 "sf_jank", "worst_overrun_ms"],
+                                [[PKG, "478", "0", "0", "0", "0", "0"]])
+        rows = [["Choreographer#doFrame", "478", "900"], ["Recomposer:animation", "477", "300"]]
+        if recomposed:
+            rows.append(["Compose:recompose", str(recomposed), "390"])
+        r["42_frame_phases"] = (["name", "n", "total_ms"], rows)
+        return [x for x in run(r)[1] if x["kind"] == "always_animating"][0]
+    draw = stages(74)
+    assert draw["animation_phase"] == "draw" and "only 74 of them" in draw["detail"], draw
+    assert "Composition tracing will not name it" in draw["action"]
+    assert stages(0)["animation_phase"] == "draw", "no recomposition at all is the same clue"
+    comp = stages(470)
+    assert comp["animation_phase"] == "composition", comp
+    assert "Composition tracing names the composable" in comp["action"]
+
+
+@case
 def unnamed_binder_calls_say_when_the_android_version_is_why():
     r = old_phone()
     r["30_binder_main_thread"] = (["client_process", "aidl_name", "server_process", "n", "total_ms", "max_ms"],

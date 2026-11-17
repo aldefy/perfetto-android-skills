@@ -1096,6 +1096,12 @@ def audit_intro(audit: dict | None) -> str:
                      for f in files[:14])
     more = (f'<p class="src">and {len(files) - 14} more, in code_audit.md</p>'
             if len(files) > 14 else "")
+    left_out = audit.get("skipped_debug") or []
+    if left_out:
+        more += ('<p class="src">Left out because they sit behind a debug check and do not run '
+                 'in a release build: ' + ", ".join(
+                     f'<code>{esc(os.path.basename(h["file"]))}:{esc(str(h["line"]))}</code>'
+                     for h in left_out[:8]) + ".</p>")
     return (f'<div class="audit"><p><span class="tag">code audit</span> {esc(audit.get("summary", ""))}</p>'
             f'<details><summary>Which code was read, and why</summary><ul class="steps">{how}</ul>'
             f'<ul class="evidence">{listed}</ul>{more}'

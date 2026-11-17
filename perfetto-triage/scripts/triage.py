@@ -1023,11 +1023,28 @@ def analyse(results: dict, pkg: str, mode: str = "unknown",
     if mode == "startup":
         drawn = next((num(r.get("frames")) or 0 for r in table("20_jank_summary")
                       if pkg in ("*", "") or _glob(r.get("process_name", ""), pkg)), 0)
-        ticks = sum(num(r.get("n")) or 0 for r in table("40_slice_hotspots")
-                    if r.get("name") == "Recomposer:animation")
+        stages = {r.get("name"): num(r.get("n")) or 0 for r in table("42_frame_phases")}
+        hot = {r.get("name"): num(r.get("n")) or 0 for r in table("40_slice_hotspots")}
+        ticks = stages.get("Recomposer:animation", hot.get("Recomposer:animation", 0))
+        recomposed = stages.get("Compose:recompose", hot.get("Compose:recompose"))
+        if recomposed is None and stages:
+            recomposed = 0          # the stage query ran and saw none
         compose = drawn and ticks >= 0.8 * drawn
         if drawn >= 300 or (drawn >= 180 and compose):
-            src[:] = ["20_jank_summary", "40_slice_hotspots"]
+            # Read in composition, an animated value recomposes its reader every
+            # frame. Frames with the frame clock but no recomposition mean the
+            # value is read later, in a draw or layout block.
+            phase = (None if not compose or recomposed is None
+                     else "draw" if recomposed <= 0.3 * ticks else "composition")
+            clue = ""
+            if phase == "draw":
+                clue = (f" Recomposition ran in only {recomposed:.0f} of them, so the animated "
+                        "value is most likely read while drawing: a Canvas, drawBehind or "
+                        "graphicsLayer block, or a progress indicator.")
+            elif phase == "composition":
+                clue = (f" Recomposition ran in {recomposed:.0f} of them, so a composable "
+                        "reads the animated value and recomposes on every frame.")
+            src[:] = ["20_jank_summary", "40_slice_hotspots", "42_frame_phases"]
             add("medium", "jank",
                 f"The app drew {drawn:.0f} frames after launch with no input",
                 "A cold-start capture launches the app and then leaves it alone. A screen "
@@ -1036,12 +1053,19 @@ def analyse(results: dict, pkg: str, mode: str = "unknown",
                 + (f". Compose's frame clock ran in {ticks:.0f} of them "
                    "(Recomposer:animation), so a Compose animation is driving it."
                    if compose else ", or keeps invalidating a view.")
+                + clue
                 + " If somebody did touch the screen during the capture, ignore this.",
                 "Find what never stops: an infinite transition, a progress indicator or "
                 "shimmer still in the composition after loading, a marquee, a frame loop "
                 "(withFrameNanos), a looping Lottie or animated image. It costs battery "
                 "for as long as the screen is open and leaves less room for real work in "
-                "every frame. Composition tracing names the composable.")
+                "every frame. "
+                + ("Composition tracing will not name it, because nothing recomposes. Find "
+                   "it by elimination: switch one suspect off, capture a cold start, and "
+                   "compare the frame count." if phase == "draw" else
+                   "Composition tracing names the composable that recomposes."))
+            if phase:
+                f[-1]["animation_phase"] = phase
 
     # --- 4. ANR -----------------------------------------------------------
     anrs = table("41_anrs")
@@ -1200,7 +1224,8 @@ SECTIONS = [
     ("Blocking: binder, IPC and locks",
      ["30_binder_main_thread", "31_binder_why_slow", "32_monitor_contention",
       "33_main_thread_blocking"]),
-    ("Hotspots and ANRs", ["40_slice_hotspots", "41_anrs"]),
+    ("Hotspots and ANRs", ["40_slice_hotspots", "41_anrs", "42_frame_phases",
+                           "25_app_code_in_trace"]),
 ]
 
 
@@ -1362,7 +1387,8 @@ def main():
             flow = [x.strip() for x in args.flow.split(",") if x.strip()]
             seen = [r.get("name", "") for r in
                     as_dicts(*results.get("25_app_code_in_trace", ([], [])))]
-            audit = amod.audit(index, findings, mode, flow, code_map, servers, args.pkg, seen)
+            audit = amod.audit(index, findings, mode, flow, code_map, servers, args.pkg, seen,
+                               status.get("build_type") == "debuggable")
             audit_md = amod.to_markdown(audit)
             log(audit["summary"])
         except Exception as exc:

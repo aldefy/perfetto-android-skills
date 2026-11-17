@@ -427,9 +427,61 @@ def test_debug_source_sets_are_not_read_and_debug_guarded_lines_are_marked():
     a = run(root=kmp())
     assert "DebugMenu.kt" not in [os.path.basename(f["file"]) for f in a["path"]["files"]]
     hits = checks(a, "sdk_init_on_start")
-    assert [h["line"] for h in hits] == [7, 6], "the line that ships comes before the debug-only one"
-    assert hits[1]["debug_only"] and "debug check" in hits[1]["note"]
-    assert "note" not in hits[0]
+    assert [h["line"] for h in hits] == [7], "the debug-only line is not a startup cost in release"
+    assert [(os.path.basename(h["file"]), h["line"]) for h in a["skipped_debug"]] == [("App.android.kt", 6)]
+    assert "Left out because they sit behind a debug check" in ca.to_markdown(a)
+    kept = ca.audit(cm.scan_repo(kmp()), ALL, "startup", debug_build=True)
+    assert [h["line"] for h in checks(kept, "sdk_init_on_start")] == [7, 6] or \
+        sorted(h["line"] for h in checks(kept, "sdk_init_on_start")) == [6, 7], \
+        "on a debuggable capture that code did run, so it stays"
+
+
+def test_debug_only_code_is_recognised_in_the_shapes_it_is_written_in():
+    """Two lines a real run flagged as startup cost both sat behind a debug check."""
+    text = """class App {
+    fun onCreate() {
+        if (BuildConfig.DEBUG) {
+            Timber.plant(Tree())
+            val manager = getSystemService(NotificationManager::class.java)
+        } else {
+            Sentry.init(this)
+        }
+        if (BuildConfig.DEBUG) LogStore.init(dir)
+        Analytics.init(this)
+        if (!BuildConfig.DEBUG) {
+            Crash.init(this)
+        }
+        setUpInspector()
+    }
+
+    private fun setUpInspector() {
+        if (!BuildConfig.DEBUG) return
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.createNotificationChannel(channel)
+    }
+
+    private fun debugMenu() {
+        Menu.init(this)
+    }
+
+    fun other() {
+        if (BuildConfig.DEBUG) {
+            debugMenu()
+        }
+        Maps.init(this)
+    }
+}
+"""
+    marked = {n + 1 for n in ca.debug_lines(text)}
+    for line, why in ((4, "inside a debug block"), (5, "inside a debug block"),
+                      (9, "a single-line debug if"), (19, "after if (!DEBUG) return"),
+                      (20, "after if (!DEBUG) return"),
+                      (24, "a private function only called from a debug block")):
+        assert line in marked, f"line {line} is debug-only: {why}"
+    for line, why in ((7, "the else branch ships"), (10, "plain code"),
+                      (12, "inside if (!DEBUG): release only"), (14, "a plain call"),
+                      (31, "after the debug block has closed")):
+        assert line not in marked, f"line {line} is not debug-only: {why}"
 
 
 def test_an_exact_screen_name_wins_over_names_that_only_contain_it():
@@ -470,6 +522,103 @@ def test_code_the_trace_names_joins_the_path():
     assert [base(h) for h in hit] == ["MapStage.kt"] and hit[0]["on_path"] == "named in the trace"
     quiet = ca.audit(index, [finding("always_animating")], "interactive", None, None, [], "", [])
     assert any("does not say which screens ran" in h for h in quiet["path"]["how"])
+
+
+NAV = {
+    "composeApp/src/commonMain/kotlin/com/example/shop/AppNavigation.kt": """package com.example.shop
+
+@Composable
+fun AppNavigation() {
+    NavHost(nav, startDestination = Routes.Home) {
+        composable(Routes.Home) { HomeScreen() }
+        composable(Routes.Search) { SearchScreen() }
+    }
+}
+""",
+    "composeApp/src/commonMain/kotlin/com/example/shop/home/HomeScreen.kt": """package com.example.shop.home
+
+@Composable
+fun HomeScreen() {
+    HomeHeader()
+    WeatherBadge()
+}
+""",
+    "composeApp/src/commonMain/kotlin/com/example/shop/home/HomeHeader.kt": """package com.example.shop.home
+
+@Composable
+fun HomeHeader() {
+    val t = rememberInfiniteTransition(label = "sky")
+    val drift by t.animateFloat(0f, 1f, infiniteRepeatable(tween(4000)))
+    Canvas(Modifier.fillMaxWidth()) {
+        drawCircle(Color.White, radius = 4f, center = Offset(size.width * drift, 20f))
+    }
+}
+""",
+    "composeApp/src/commonMain/kotlin/com/example/shop/home/WeatherBadge.kt": """package com.example.shop.home
+
+@Composable
+fun WeatherBadge() {
+    val pulse = rememberInfiniteTransition(label = "pulse")
+    val scale by pulse.animateFloat(1f, 1.1f, infiniteRepeatable(tween(900)))
+    Text("Rain", fontSize = (14 * scale).sp)
+}
+""",
+    "composeApp/src/commonMain/kotlin/com/example/shop/search/SearchScreen.kt":
+        "package com.example.shop.search\n@Composable\nfun SearchScreen() { val vm = SearchViewModel() }\n",
+    "composeApp/src/commonMain/kotlin/com/example/shop/search/SearchViewModel.kt": """package com.example.shop.search
+
+class SearchViewModel {
+    fun retryWhenOnline() = scope.launch {
+        while (true) {
+            if (online()) break
+            delay(2000)
+        }
+    }
+}
+""",
+    "other/src/commonMain/kotlin/dev/another/app/Shimmer.kt":
+        "package dev.another.app\n@Composable\nfun Shimmer() { rememberInfiniteTransition() }\n",
+}
+
+
+def test_the_first_screen_is_read_from_the_navigation_set_up():
+    """The always-on animation was not located: the entry files of a large app
+    refer to more files than fit, and the first screen was never reached."""
+    a = run(findings=[finding("always_animating")], root=kmp(NAV))
+    roles = {os.path.basename(f["file"]): f["role"] for f in a["path"]["files"]}
+    assert roles["HomeScreen.kt"] == "first screen: Home", roles
+    assert roles["HomeHeader.kt"].startswith("in the first screen's tree, 1 step from HomeScreen.kt")
+    assert any(h.startswith("First screen: Home, read from the navigation set-up in AppNavigation.kt")
+               for h in a["path"]["how"]), a["path"]["how"]
+    hits = checks(a, "endless_animation")
+    assert {base(h) for h in hits} == {"HomeHeader.kt", "WeatherBadge.kt"}, \
+        "candidates come from the first screen, not from another app in the same repo"
+    assert all("first screen" in h["on_path"] for h in hits)
+
+
+def test_a_background_loop_with_a_delay_is_not_an_animation():
+    """`while (true) { ...; delay() }` in a ViewModel was flagged as redrawing every frame."""
+    a = run(findings=[finding("always_animating")], root=kmp(NAV))
+    assert not [it for it in a["items"] if base(it) == "SearchViewModel.kt"], \
+        [it["check"] for it in a["items"] if base(it) == "SearchViewModel.kt"]
+
+
+def test_when_frames_draw_without_recomposing_the_draw_block_candidate_comes_first():
+    f = dict(finding("always_animating"), animation_phase="draw")
+    hits = checks(run(findings=[f], root=kmp(NAV)), "endless_animation")
+    assert base(hits[0]) == "HomeHeader.kt" and "draw block" in hits[0]["note"], hits[0]
+    assert "note" not in [h for h in hits if base(h) == "WeatherBadge.kt"][0]
+    plain = checks(run(findings=[finding("always_animating")], root=kmp(NAV)), "endless_animation")
+    assert not any("note" in h for h in plain), "no clue from the trace, no claim"
+
+
+def test_the_repo_wide_fallback_prefers_the_traced_apps_own_package():
+    extra = {k: v for k, v in NAV.items() if "/home/" not in k and "AppNavigation" not in k}
+    extra["composeApp/src/commonMain/kotlin/com/example/shop/promo/Banner.kt"] = \
+        "package com.example.shop.promo\n@Composable\nfun Banner() { rememberInfiniteTransition() }\n"
+    hits = checks(run(findings=[finding("always_animating")], root=kmp(extra)), "endless_animation")
+    assert base(hits[0]) == "Banner.kt", [base(h) for h in hits]
+    assert all("not known to be on the path" in h["on_path"] for h in hits)
 
 
 def test_indeterminate_progress_is_a_candidate_and_a_determinate_one_is_not():
