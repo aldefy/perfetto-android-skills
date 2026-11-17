@@ -22,7 +22,7 @@ perfetto-triage/
     triage.py                  parses a trace once, runs the query pack, writes a ranked report
     visual_report.py           turns that output into one self-contained report.html with charts
     code_map.py                checks each hot slice name against the app's source: yours, or not
-    remeasure.py                diffs two triage-out directories: findings, jank numbers, self-time hotspots
+    remeasure.py                before against after: one run each, or many runs each with medians and a noise verdict
     ab_startup.sh               adb-only before/after harness when a benchmark module is out of scope
   queries/                    20 PerfettoSQL files, 00_health.sql through 41_anrs.sql
   references/

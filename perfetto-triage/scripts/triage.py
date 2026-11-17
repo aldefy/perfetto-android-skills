@@ -632,8 +632,9 @@ def analyse(results: dict, pkg: str, mode: str = "unknown",
             f"Shader / pipeline compilation during janky frames ({tot:.0f} ms)",
             "Slices matched: " + ", ".join(r["name"] for r in shader[:3]) + "." + jank_ctx,
             "This is first-run-only jank that every user hits. Warm it up: run the "
-            "animation once behind a splash, or ship a Baseline Profile — "
-            "ProfileInstaller also primes the shader cache.")
+            "animation once behind a splash, so the compile happens before the user "
+            "is watching. A Baseline Profile does not help here: it compiles app "
+            "code ahead of time, not GPU shaders.")
     inflate = [r for r in hot if re.search(r"inflate|measure|layout|traversal", r["name"], re.I)]
     if inflate:
         tot = sum(num(r["total_ms"]) or 0 for r in inflate)

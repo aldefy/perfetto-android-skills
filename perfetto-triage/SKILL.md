@@ -280,6 +280,25 @@ scripts/ab_startup.sh com.example.app .MainActivity 10 profile   # compiles, the
 
 Use the same mode for both builds.
 
+For a number you can quote, capture 10 or more runs per side, triage each
+into its own directory, and hand them all to `remeasure.py`. Do not work the
+medians out by hand:
+
+```bash
+python3 scripts/remeasure.py --before runs/before-* --after runs/after-*
+```
+
+It prints the median and range of each metric per side (TTID, late frames,
+class loading, and any of the app's own trace sections when triage ran with
+`--app-repo`), the change in the median, and a verdict on that change:
+`clear` (every after run is on one side of every before run), `likely`, or
+`noise`. Report only what is `clear` or `likely`. A change marked `noise` is
+not a result, however good its percentage looks.
+
+If all you need is the cold start time, `scripts/ab_startup.sh` measures 10
+launches per build without recording a trace at all. Record traces when you
+also need to know where the time went.
+
 Report the **median of ≥10 runs**, not the best run and not the mean. Startup
 distributions have a long right tail; a mean shifted by one thermal outlier is
 how people fake wins. State the device and build type next to the number, or
