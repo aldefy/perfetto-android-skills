@@ -588,12 +588,98 @@ def test_the_first_screen_is_read_from_the_navigation_set_up():
     roles = {os.path.basename(f["file"]): f["role"] for f in a["path"]["files"]}
     assert roles["HomeScreen.kt"] == "first screen: Home", roles
     assert roles["HomeHeader.kt"].startswith("in the first screen's tree, 1 step from HomeScreen.kt")
-    assert any(h.startswith("First screen: Home, read from the navigation set-up in AppNavigation.kt")
+    assert any(h.startswith("First screen: Home. Read from the navigation set-up in AppNavigation.kt")
                for h in a["path"]["how"]), a["path"]["how"]
     hits = checks(a, "endless_animation")
     assert {base(h) for h in hits} == {"HomeHeader.kt", "WeatherBadge.kt"}, \
         "candidates come from the first screen, not from another app in the same repo"
     assert all("first screen" in h["on_path"] for h in hits)
+
+
+NAV3 = {
+    "composeApp/src/commonMain/kotlin/com/example/shop/AppNavigation.kt": """package com.example.shop
+
+@Composable
+fun AppNavigation(onFinish: () -> Unit = {}) {
+    val initialRoute: Any = remember {
+        when {
+            hasSession() && finishedSetup() -> LandingRoute
+            hasSession() -> SetupRoute(0)
+            else -> WelcomeRoute
+        }
+    }
+    val backStack = remember { mutableStateListOf(initialRoute) }
+    val recent = remember { mutableStateListOf(SearchScreen) }
+    NavDisplay(backStack = backStack, entryProvider = entryProvider {
+        entry<LandingRoute> {
+            LandingContent(onOpen = { backStack.add(SetupRoute(1)) })
+        }
+        entry<SetupRoute> { key -> SetupScreen(key.step) }
+        entry<WelcomeRoute> { WelcomeScreen() }
+    })
+}
+""",
+    "composeApp/src/commonMain/kotlin/com/example/shop/Routes.kt":
+        "package com.example.shop\nobject LandingRoute\ndata class SetupRoute(val step: Int)\nobject WelcomeRoute\n",
+    "composeApp/src/commonMain/kotlin/com/example/shop/landing/LandingContent.kt": """package com.example.shop.landing
+
+@Composable
+fun LandingContent(onOpen: () -> Unit) {
+    TripCard()
+}
+""",
+    "composeApp/src/commonMain/kotlin/com/example/shop/landing/TripCard.kt": """package com.example.shop.landing
+
+@Composable
+fun TripCard() {
+    val t = rememberInfiniteTransition(label = "glow")
+    Box(Modifier.drawBehind { drawCircle(Color.White) })
+}
+""",
+    "composeApp/src/commonMain/kotlin/com/example/shop/setup/SetupScreen.kt":
+        "package com.example.shop.setup\n@Composable\nfun SetupScreen(step: Int) { rememberInfiniteTransition() }\n",
+    "composeApp/src/commonMain/kotlin/com/example/shop/welcome/WelcomeScreen.kt":
+        "package com.example.shop.welcome\n@Composable\nfun WelcomeScreen() { rememberInfiniteTransition() }\n",
+    "composeApp/src/commonMain/kotlin/com/example/shop/search/SearchScreen.kt":
+        "package com.example.shop.search\n@Composable\nfun SearchScreen() { rememberInfiniteTransition() }\n",
+}
+
+
+def test_first_screen_from_a_typed_multi_line_value_and_a_hand_built_back_stack():
+    """A real app wrote it this way, and none of it was recognised: a type
+    annotation before the =, a value spread over a `when`, and a Navigation 3
+    back stack made with mutableStateListOf instead of rememberNavBackStack."""
+    a = run(findings=[finding("always_animating")], root=kmp(NAV3))
+    roles = {os.path.basename(f["file"]): f["role"] for f in a["path"]["files"]}
+    assert roles["LandingContent.kt"] == "first screen: Landing", roles
+    assert roles["SetupScreen.kt"] == "first screen: Setup"
+    assert roles["WelcomeScreen.kt"] == "first screen: Welcome"
+    assert roles["TripCard.kt"].startswith("in the first screen's tree, 1 step from LandingContent.kt")
+    how = next(h for h in a["path"]["how"] if h.startswith("First screen"))
+    assert "Landing, Setup or Welcome, depending on the app's state" in how, how
+    assert "AppNavigation.kt" in how
+    assert "first screen" not in roles.get("SearchScreen.kt", ""), \
+        "another state list in the same file is not the back stack"
+    hits = checks(a, "endless_animation")
+    assert [base(h) for h in hits][:3] == ["TripCard.kt", "SetupScreen.kt", "WelcomeScreen.kt"], \
+        f"the first branch in the code comes first: {[base(h) for h in hits]}"
+
+
+def test_it_says_so_when_the_first_screen_holds_no_animation_candidate():
+    nav = dict(NAV3)
+    for key in list(nav):
+        if key.endswith(("TripCard.kt", "SetupScreen.kt", "WelcomeScreen.kt")):
+            nav[key] = nav[key].replace("rememberInfiniteTransition", "rememberSaveable")
+    a = run(findings=[finding("always_animating")], root=kmp(nav))
+    assert any("Nothing that animates without end was found in the first screen's tree" in n
+               for n in a["notes"]), a["notes"]
+    assert "weaker leads" in ca.to_markdown(a)
+    assert run(findings=[finding("always_animating")], root=kmp(NAV3))["notes"] == []
+
+
+def test_no_first_screen_is_said_out_loud_on_a_cold_start():
+    a = run(findings=[finding("always_animating")], root=kmp())
+    assert any("first screen could not be read" in h and "--flow" in h for h in a["path"]["how"])
 
 
 def test_a_background_loop_with_a_delay_is_not_an_animation():

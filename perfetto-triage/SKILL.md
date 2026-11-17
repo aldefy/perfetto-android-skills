@@ -278,10 +278,12 @@ The path is worked out like this:
 - A cold start runs the Application class, the startup initializers and the
   launcher Activity from `AndroidManifest.xml`, then the app code those refer
   to, two steps out. It ends on the first screen, which is read from the
-  navigation set-up (`startDestination = ...`, a Navigation 3 start key, a
-  Voyager `Navigator`), and that screen's own tree is followed three steps in.
-  Nothing more is needed from you. If `code_audit.md` names no first screen,
-  the navigation was not recognised: pass the screen with `--flow`.
+  navigation set-up (`startDestination = ...`, a start key, a Navigation 3
+  back stack, a Voyager `Navigator`), and that screen's own tree is followed
+  three steps in. When the first screen depends on the app's state, every
+  branch is listed in the order the code checks them: say which one the
+  capture was in. If `code_audit.md` has no "First screen" line, the
+  navigation was not recognised: pass the screen with `--flow`.
 - A flow you drove runs the screens you opened. The trace does not name them
   unless the app has trace sections, so say which ones:
 

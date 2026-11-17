@@ -60,11 +60,16 @@ UI_FILE = re.compile(r"@Composable|\bCanvas\s*\(|: View\b|\bAnimator\b|Drawable\
 DRAW_READER = re.compile(r"\bCanvas\s*\(|drawBehind|drawWithContent|drawWithCache|graphicsLayer\s*\{|"
                          r"\bdrawIntoCanvas|\.draw(?:Rect|Circle|Line|Path|Arc|Image|RoundRect)\s*\(|"
                          r"ProgressIndicator\s*\(")
+# Where an app says which screen it opens on. Each pattern ends where the value
+# begins. A type annotation may sit before the "=": val initialRoute: Any = ...
 START_DESTINATION = re.compile(
-    r"\bstart(?:Destination|Key|Route|Screen)\s*=\s*([^\n]+)|"
-    r"rememberNavBackStack\s*\(\s*([A-Z][^\n]*)|"
-    r"\bNavigator\s*\(\s*(?:screen\s*=\s*)?([A-Z]\w*\s*\([^\n]*)|"
-    r"\binitial(?:Route|Destination|Screen)\s*=\s*([^\n]+)")
+    r"\b(?:start|initial)(?:Destination|Key|Route|Screen)\w*\s*(?::\s*[\w<>?., ]+?)?\s*=(?!=)\s*|"
+    r"\brememberNavBackStack\s*\(\s*|"
+    r"\bNavigator\s*\(\s*(?:screen\s*=\s*)?(?=[A-Z]\w*\s*\()|"
+    r"\b(mutableStateListOf)\s*(?:<[^>\n]*>)?\s*\(\s*")
+ROUTE_SUFFIX = re.compile(r"(NavKey|Destination|Route|Screen|Graph|Key)$")
+NOT_A_ROUTE = {"any", "unit", "string", "int", "long", "boolean", "float", "list", "set", "map",
+               "pair", "modifier", "color", "navkey", "navhost", "navdisplay"}
 NAV_NOISE = {"screen", "screens", "route", "routes", "destination", "destinations", "nav", "graph",
              "name", "companion", "value", "navigation", "navkey", "key", "if", "else", "when",
              "true", "false", "null", "it", "this", "remember", "val", "var", "state", "app"}
@@ -426,42 +431,124 @@ def _package(index: dict, rel: str) -> str:
     return m.group(1) if m else ""
 
 
-def first_screen(index: dict, near: list[str]) -> list[tuple[str, str, str]]:
-    """The screen a cold start lands on: [(file, screen name, declared in)].
-    Read from the navigation set-up: startDestination = ..., a Navigation 3
-    back stack, a Voyager Navigator. `near` are the entry files, used to prefer
-    a declaration in the same package when a repo holds more than one app."""
+def _value_at(text: str, pos: int, limit: int = 1500) -> str:
+    """The expression that starts at pos: up to the end of the line, or as far
+    as the brackets it opens go, so `remember { when { ... } }` comes back whole."""
+    depth, out = 0, []
+    for ch in text[pos:pos + limit]:
+        if ch in "({[":
+            depth += 1
+        elif ch in ")}]":
+            if depth == 0:
+                break
+            depth -= 1
+        elif ch in "\n," and depth == 0:
+            break
+        out.append(ch)
+    return "".join(out)
+
+
+def _routes_in(index: dict, value: str) -> list[str]:
+    """The routes an expression can produce, in the order they are written. A
+    `when` with three branches gives three."""
+    quoted = [w for q in re.findall(r'"([^"]*)"', value) for w in re.findall(r"[A-Za-z]\w*", q)]
+    typed = re.findall(r"\b[A-Z]\w*", re.sub(r'"[^"]*"', "", value))
+    out = []
+    for word in typed + quoted:
+        low = word.lower()
+        if low in NAV_NOISE or low in NOT_A_ROUTE or len(word) < 3 or word in out:
+            continue
+        out.append(word)        # a word that is no screen resolves to no file and drops out later
+    return out[:8]
+
+
+def _screens_for_route(index: dict, route: str, declared_in: str) -> list[str]:
+    """Files of the screen a route shows. First by the navigation entry that
+    names the route, entry<LandingRoute> { LandingContent(...) }, then by name."""
+    block = re.compile(
+        r"(?:entry|composable|dialog|bottomSheet|scene)\s*<\s*(?:[\w.]+\.)?" + re.escape(route) + r"\b[^>\n]*>"
+        r"|composable\s*\(\s*(?:route\s*=\s*)?[\w.\"]*" + re.escape(route) + r"\b")
+    symbols = symbol_index(index)
+    files = [declared_in] + [rel for rels in index.get("all_files", {}).values() for rel in rels
+                             if rel != declared_in and rel.endswith(".kt") and _android(rel)]
+    for rel in dict.fromkeys(files):
+        text = _text(index, rel)
+        if route not in text:
+            continue
+        for m in block.finditer(text):
+            start = text.find("{", m.end())
+            if start < 0 or start - m.end() > 200:
+                continue
+            body = _value_at(text, start + 1, 1200)
+            hits = []
+            for call in re.findall(r"\b([A-Z]\w*)\s*\(", body):
+                for f in symbols.get(call, []):
+                    if _android(f) and "@Composable" in _text(index, f) and f not in hits:
+                        hits.append(f)
+                if len(hits) >= 2:
+                    break
+            if hits:
+                return hits[:2]
+    name = ROUTE_SUFFIX.sub("", route) or route
+    return [f for f in match_name(index, _squash(name), loose=False)[:4]
+            if "@Composable" in _text(index, f)]
+
+
+def first_screen(index: dict, near: list[str]) -> list[tuple[str, str, str, int]]:
+    """The screen a cold start lands on: [(file, screen name, declared in, branch)].
+
+    Read from the navigation set-up: startDestination = ..., a start key, a
+    Navigation 3 back stack (rememberNavBackStack, or a state list in a file
+    that uses NavDisplay), a Voyager Navigator. The value may be a variable
+    defined elsewhere in the file, and may span lines. When it depends on the
+    app's state, every branch is returned, in the order written.
+
+    `near` are the entry files, used to prefer a declaration in the same
+    package when a repo holds more than one app."""
     roots = [_package(index, r) for r in near]
-    found = []                      # (closeness, declaring file, expression)
+    found = []                      # (closeness, declaring file, [routes])
     for rels in index.get("all_files", {}).values():
         for rel in rels:
             if not rel.endswith(".kt") or not _android(rel):
                 continue
-            text = _text(index, rel)
-            if "start" not in text and "Navigator(" not in text \
-                    and "rememberNavBackStack" not in text and "initial" not in text:
+            raw = _text(index, rel)
+            if "start" not in raw and "Navigator(" not in raw and "NavBackStack" not in raw \
+                    and "initial" not in raw and "NavDisplay" not in raw:
                 continue
+            text = STRINGS_AND_COMMENTS.sub(
+                lambda q: q.group(0) if q.group(0).startswith('"') else "", raw)
+            nav3 = "NavDisplay" in text or "NavBackStack" in text or "NavKey" in text
             close = max([_shared_segments(_package(index, rel), root) for root in roots] or [0])
-            for m in START_DESTINATION.finditer(STRINGS_AND_COMMENTS.sub(
-                    lambda q: q.group(0) if q.group(0).startswith('"') else "", text)):
-                found.append((close, rel, next(g for g in m.groups() if g)[:120]))
+            for m in START_DESTINATION.finditer(text):
+                if m.group(1) and not (nav3 and re.search(
+                        r"back_?stack", text[text.rfind("\n", 0, m.start()) + 1:m.start()], re.I)):
+                    continue        # a state list that is not the back stack
+                value = _value_at(text, m.end())
+                name = value.strip()
+                if re.fullmatch(r"[a-z]\w*", name):
+                    # a variable: read its definition in this file instead
+                    d = re.search(r"\bva[lr]\s+" + re.escape(name) + r"\b[^=\n]*=(?!=)\s*", text)
+                    if not d:
+                        continue
+                    value = _value_at(text, d.end())
+                routes = _routes_in(index, value)
+                if routes:
+                    found.append((close, rel, routes))
     if not found:
         return []
     best = max(f[0] for f in found)
     out, seen = [], set()
-    for _, rel, expr in [f for f in found if f[0] == best][:6]:
-        # a screen is named by a type (Routes.Home, HomeScreen()) or a string ("home")
-        head = expr.split(",")[0]
-        words = re.findall(r"\b[A-Z]\w*", re.sub(r'"[^"]*"', "", head)) \
-            + [w for q in re.findall(r'"([^"]*)"', head) for w in re.findall(r"[A-Za-z]\w*", q)]
-        for word in words:
-            name = re.sub(r"(NavKey|Destination|Route|Screen|Graph|Key)$", "", word) or word
-            if name.lower() in NAV_NOISE or len(name) < 3 or name.lower() in seen:
+    for _, rel, routes in [f for f in found if f[0] == best][:6]:
+        for route in routes:
+            name = ROUTE_SUFFIX.sub("", route) or route
+            if name.lower() in seen:
+                continue
+            hits = _screens_for_route(index, route, rel)
+            if not hits or len(seen) >= 4:
                 continue
             seen.add(name.lower())
-            for hit in match_name(index, _squash(name), loose=False)[:6]:
-                if "@Composable" in _text(index, hit):
-                    out.append((hit, name, rel))
+            for hit in hits:
+                out.append((hit, name, rel, len(seen) - 1))
     return out
 
 
@@ -561,17 +648,17 @@ def build_path(index: dict, mode: str, flow: list[str] | None, code_map: dict | 
     # because the entry files of a large app refer to more files than fit.
     landing = first_screen(index, [rel for rel, _ in entry]) if entry else []
     opened = []
-    for rel, name, declared in landing:
+    for rel, name, declared, branch in landing:
         role = f"first screen: {name}"
         if add(rel, role, 0, seed=True):
             opened.append(rel)
-            files[rel]["first"] = True
+            files[rel]["first"], files[rel]["rank"] = True, branch
         elif rel in files and "first screen" not in files[rel]["role"]:
             files[rel]["role"] += ", " + role
-            files[rel]["first"] = True
+            files[rel]["first"], files[rel]["rank"] = True, branch
     if landing:
-        names = ", ".join(dict.fromkeys(name for _, name, _ in landing))
-        frontier, tree = [rel for rel, _, _ in landing], 0
+        names = list(dict.fromkeys(name for _, name, _, _ in landing))
+        frontier, tree = [rel for rel, _, _, _ in landing], 0
         for depth in (1, 2, 3):
             nxt = []
             for rel in frontier:
@@ -581,12 +668,20 @@ def build_path(index: dict, mode: str, flow: list[str] | None, code_map: dict | 
                     if add(ref, f"in the first screen's tree, {depth} step{'' if depth == 1 else 's'} "
                                 f"from {os.path.basename(rel)}", depth):
                         files[ref]["first"] = True
+                        files[ref]["rank"] = files[rel].get("rank", 0)
                         nxt.append(ref)
                         tree += 1
             frontier = nxt
-        how.append(f"First screen: {names}, read from the navigation set-up in "
+        which = (names[0] if len(names) == 1 else
+                 ", ".join(names[:-1]) + " or " + names[-1] + ", depending on the app's state "
+                 "(listed in the order the code checks them)")
+        how.append(f"First screen: {which}. Read from the navigation set-up in "
                    f"{os.path.basename(landing[0][2])}. {tree} more UI file{'' if tree == 1 else 's'} "
-                   f"in its tree, up to three steps in.")
+                   f"in {'its tree' if len(names) == 1 else 'their trees'}, up to three steps in.")
+    elif entry and mode == "startup":
+        how.append("No navigation set-up was recognised, so the first screen could not be read "
+                   "from it. If the app has more than one screen, name the first with --flow "
+                   "so its code is audited.")
 
     # What the entry files refer to, two steps out. A reference is not proof the
     # code ran, so each file keeps how far it is from an entry point.
@@ -942,6 +1037,7 @@ def audit(index: dict, findings: list, mode: str = "unknown", flow: list[str] | 
         hits.sort(key=lambda h: (
             h.get("_far", -99),
             not files.get(h["file"], {}).get("first", False) if check.get("ui_only") else False,
+            files.get(h["file"], {}).get("rank", 9) if check.get("ui_only") else 0,
             not h.get("draws", False) if check.get("ui_only") and phase == "draw" else False,
             "off the main thread" in h.get("note", ""),
             files.get(h["file"], {"depth": 9})["depth"]))
@@ -955,6 +1051,18 @@ def audit(index: dict, findings: list, mode: str = "unknown", flow: list[str] | 
             items[-1]["more"] = len(hits) - limit
         if widened:
             items[-1]["widened"] = True
+
+    # Say so when the first screen was found and holds none of the animation
+    # candidates: the ones listed are then further away, and weaker.
+    notes = []
+    tree = [r for r, m in files.items() if m.get("first")]
+    moving = [it for it in items if it["check"] in ("endless_animation", "redraws_while_shown")]
+    if "always_animating" in kinds and tree and moving \
+            and not any(files.get(it["file"], {}).get("first") for it in moving):
+        notes.append(f"Nothing that animates without end was found in the first screen's tree "
+                     f"({len(tree)} files). The animation candidates listed are further from "
+                     f"it, so they are weaker leads. The cause may sit in a library, or be "
+                     f"built in a way no pattern here covers.")
 
     # One line, one candidate: the telephony reading is the more specific one.
     specific = {(it["file"], it["line"]) for it in items if it["check"] == "telephony_call"}
@@ -985,7 +1093,7 @@ def audit(index: dict, findings: list, mode: str = "unknown", flow: list[str] | 
                  "files": [{"file": r, "role": files[r]["role"], "depth": files[r]["depth"]}
                            for r in order],
                  "capped": path["capped"]},
-        "items": items, "clean": clean,
+        "items": items, "clean": clean, "notes": notes,
         "skipped_debug": [{"file": h["file"], "line": h["line"], "code": h["code"]}
                           for h in skipped[:20]],
         "limits": "Pattern matches in source. They cannot see which thread a line runs on, or "
@@ -995,6 +1103,8 @@ def audit(index: dict, findings: list, mode: str = "unknown", flow: list[str] | 
 
 def to_markdown(a: dict, heading: str = "## Code on the profiled path") -> str:
     out = [heading, "", a["summary"], ""]
+    for note in a.get("notes") or []:
+        out.extend([note, ""])
     out.append("How the path was worked out:")
     out.append("")
     out.extend(f"- {line}" for line in a["path"]["how"])

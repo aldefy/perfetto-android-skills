@@ -1102,7 +1102,8 @@ def audit_intro(audit: dict | None) -> str:
                  'in a release build: ' + ", ".join(
                      f'<code>{esc(os.path.basename(h["file"]))}:{esc(str(h["line"]))}</code>'
                      for h in left_out[:8]) + ".</p>")
-    return (f'<div class="audit"><p><span class="tag">code audit</span> {esc(audit.get("summary", ""))}</p>'
+    notes = "".join(f"<p>{esc(n)}</p>" for n in audit.get("notes") or [])
+    return (f'<div class="audit"><p><span class="tag">code audit</span> {esc(audit.get("summary", ""))}</p>{notes}'
             f'<details><summary>Which code was read, and why</summary><ul class="steps">{how}</ul>'
             f'<ul class="evidence">{listed}</ul>{more}'
             f'<p class="src">{esc(audit.get("limits", ""))}</p></details></div>')
