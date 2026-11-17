@@ -200,7 +200,7 @@ pass. Act on the verdict:
 - `not_trustworthy`: stop and fix the capture.
 
 While it runs, triage prints one line per step on stderr: loading the trace,
-each query as `[13/20] 23_jank_hot_slices: 25 rows in 0.4s`, then the report
+each query as `[13/21] 23_jank_hot_slices: 25 rows in 0.4s`, then the report
 files. A step that takes long prints `still running, 40s so far` every 20
 seconds. On a trace of several hundred MB the load and a few queries can take
 minutes; that is slow, not stuck, so relay the current line instead of
@@ -277,7 +277,11 @@ The path is worked out like this:
 
 - A cold start runs the Application class, the startup initializers and the
   launcher Activity from `AndroidManifest.xml`, then the app code those refer
-  to, two steps out. Nothing more is needed from you.
+  to, two steps out. It ends on the first screen, which is read from the
+  navigation set-up (`startDestination = ...`, a Navigation 3 start key, a
+  Voyager `Navigator`), and that screen's own tree is followed three steps in.
+  Nothing more is needed from you. If `code_audit.md` names no first screen,
+  the navigation was not recognised: pass the screen with `--flow`.
 - A flow you drove runs the screens you opened. The trace does not name them
   unless the app has trace sections, so say which ones:
 
@@ -312,13 +316,22 @@ sections when the app has none.
 
 Every item is a candidate. It is a pattern match in source: it cannot see
 which thread a line runs on, or whether the line ran at all. A line with a
-background dispatcher just above it is flagged as probably fine, and a line
-inside a debug check is flagged as not running in a release build. Before you
+background dispatcher just above it is flagged as probably fine. Code behind a
+debug check (`if (BuildConfig.DEBUG) { ... }`, after `if (!BuildConfig.DEBUG)
+return`, or a private function only called from such a place) is left out of a
+release capture and listed at the end of `code_audit.md`. Before you
 tell the person something is the cause:
 
 1. Open the file and read the function around the line.
 2. Decide whether it runs on the path you captured and on the main thread.
 3. Drop the ones that do not, and say which you dropped and why.
+
+When the app kept drawing after launch with no input, the finding also says
+where the animated value is read. If the frame clock ran in every frame and
+recomposition in few of them, it is read in a draw block, and the candidates
+next to a `Canvas`, `drawBehind` or `graphicsLayer` block are listed first.
+Composition tracing cannot name that kind: nothing recomposes. Find it by
+elimination, one suspect per capture, watching the frame count.
 
 Then read the path files yourself with the findings in mind. The audit only
 knows the patterns it was given, and the cause is often something specific to

@@ -201,6 +201,10 @@ def test_missing_frame_timeline_on_a_cold_start_does_not_stop_the_plan():
 def test_always_on_animation_has_a_plan_and_checks_the_frame_count():
     plan = fp.build([finding("always_animating")], {"verdict": "trusted"})
     assert plan["items"][0]["priority"] == "next" and plan["items"][0]["check"] == ["frames"]
+    draw = fp.build([finding("always_animating", animation_phase="draw")], {"verdict": "trusted"})
+    assert "by elimination" in draw["items"][0]["change"][0]
+    comp = fp.build([finding("always_animating", animation_phase="composition")], {"verdict": "trusted"})
+    assert "composition tracing on" in comp["items"][0]["change"][0]
 
 
 def test_report_is_not_opened_where_it_was_asked_not_to_be():
