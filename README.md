@@ -27,7 +27,7 @@ perfetto-triage/
     remeasure.py                before against after: one run each, or many runs each with medians and a noise verdict
     ab_startup.sh               adb-only before/after harness when a benchmark module is out of scope
   queries/                    20 PerfettoSQL files, 00_health.sql through 41_anrs.sql
-    on_demand/                 run only with --app-repo: late frames by the app's own trace sections
+    on_demand/                 run only with --app-repo: late frames by the app's own trace sections, and which app code the trace names
   references/
     reading-a-trace.md         the human mental model: what a track/slice/timeline actually means
     sql-cookbook.md             PerfettoSQL schema and idioms for questions the query pack doesn't cover

@@ -15,7 +15,8 @@ second half, in two steps:
                      code those files refer to, two steps out
        a driven flow the screens the person or agent names with --flow, matched
                      to source files by name
-       either        any app class or file the trace itself names
+       either        every app class, file and trace section the trace itself
+                     names, which is the only direct evidence of what ran
   2. The audit. Each file on the path is read for patterns that match what the
      trace measured: main-thread calls into system services when the trace has
      main-thread binder time, animations that never stop when Compose work runs
@@ -46,7 +47,15 @@ MAX_PATH_FILES = 80
 MAX_PER_CHECK = 8
 STARTUP_KINDS = ["slow_cold_start", "slow_start", "startup_dominated", "startup_waiting",
                  "startup_compute", "startup_mixed"]
-JANK_KINDS = ["jank_rate", "jank_ui", "jank_split", "layout_cost", "handoff_compose-expert"]
+JANK_KINDS = ["jank_rate", "jank_ui", "jank_split", "layout_cost", "handoff_compose-expert",
+              "always_animating"]
+ANIMATION_KINDS = ["always_animating", "handoff_compose-expert", "jank_ui", "jank_rate"]
+DEBUG_ONLY = re.compile(r"(?<![!\w])(?:BuildConfig\.DEBUG|isDebug\w*|isDebuggable\w*|DEBUG_MODE)\b")
+# Words in a described flow that are not screen names.
+FLOW_NOISE = {"then", "the", "and", "to", "from", "into", "onto", "via", "with", "after", "before",
+              "screen", "screens", "page", "flow", "tab", "tap", "open", "opens", "back", "next",
+              "scroll", "scrolls", "list", "click", "press", "wait", "launch", "app", "a", "an",
+              "of", "in", "on", "for", "until", "again", "up", "down"}
 
 SYMBOL = re.compile(
     r"^[ \t]*(?:@[\w.]+(?:\([^)\n]*\))?[ \t\n]*)*"
@@ -124,7 +133,7 @@ CHECKS = [
             "until it is needed.",
      "plan": ["startup_compute", "startup_mixed", "startup_waiting"]},
     {"id": "endless_animation", "scope": "path", "repo_fallback": True,
-     "kinds": ["handoff_compose-expert", "jank_ui", "jank_rate"],
+     "kinds": ANIMATION_KINDS,
      "pattern": re.compile(r"rememberInfiniteTransition|infiniteRepeatable|withFrameNanos|"
                            r"withFrameMillis|IterateForever|iterations\s*=\s*Int\.MAX_VALUE|"
                            r"repeatCount\s*=\s*\w*\.?INFINITE|[Ss]himmer\w*\s*\("),
@@ -133,7 +142,21 @@ CHECKS = [
             "in the composition, including while it is covered or off screen.",
      "fix": "Run it only while it is visible and needed: take it out of the composition when "
             "loading ends, and stop it when the screen is covered or in the background.",
-     "plan": ["handoff_compose-expert", "jank_ui"]},
+     "plan": ["always_animating", "handoff_compose-expert", "jank_ui"]},
+    {"id": "redraws_while_shown", "scope": "path", "kinds": ANIMATION_KINDS,
+     "pattern": re.compile(
+         r"\b(?:Circular|Linear)ProgressIndicator\s*\((?![^)\n]*\bprogress\b)|"
+         r"\bbasicMarquee\s*\(|while\s*\(\s*(?:true|isActive)\s*\)|"
+         r"withInfiniteAnimationFrame\w*|\bLottieAnimation\s*\(|rememberLottieComposition|"
+         r"LottieConstants\.IterateForever|AnimatedImageDrawable|\bGifDecoder\b|"
+         r"ImageDecoderDecoder|\.placeholder\s*\([^)\n]*highlight|\bPullToRefreshBox\s*\("),
+     "title": "Something that redraws every frame while it is shown",
+     "why": "An indeterminate progress indicator, a marquee, a looping Lottie or animated "
+            "image, or a frame loop draws a new frame every refresh for as long as it is in "
+            "the composition. Left there after loading, it never lets the screen go idle.",
+     "fix": "Check that it leaves the composition when it is no longer needed, and that a "
+            "loop has a real exit. Hiding it with alpha or size zero does not stop it.",
+     "plan": ["always_animating", "handoff_compose-expert", "jank_ui"]},
     {"id": "lazy_list_without_key", "scope": "path", "kinds": JANK_KINDS,
      "pattern": re.compile(r"\bitems(?:Indexed)?\s*\((?![^\n]*\bkey\b)"),
      "title": "A lazy list with no item key",
@@ -160,7 +183,10 @@ def _android(rel: str) -> bool:
     Only the module part of the path is judged, the part before /src/, because
     package folders can be called anything."""
     path = "/" + rel.replace("\\", "/")
-    module = path.split("/src/", 1)[0]
+    module, _, inside = path.partition("/src/")
+    source_set = inside.split("/", 1)[0]
+    if re.search(r"debug$", source_set, re.I):     # src/debug, src/androidDebug: not in a release build
+        return False
     return not (set(path.split("/")) & OTHER_PLATFORMS) and not NOT_THE_APP.search(module)
 
 
@@ -232,7 +258,13 @@ def _files_for(index: dict, name: str) -> list[str]:
     """Source files for a manifest class name. With several files of that name,
     the one whose package line agrees with the manifest name wins."""
     cls = name.rsplit(".", 1)[-1]
-    files = [f for f in index.get("all_files", {}).get(cls, []) if _android(f)]
+    # The file named after the class, and any file that defines it. In Kotlin
+    # one file often holds several classes: AppActivity inside App.android.kt.
+    files = [f for f in dict.fromkeys(index.get("all_files", {}).get(cls, [])
+                                      + symbol_index(index).get(cls, [])) if _android(f)]
+    defining = [f for f in files if re.search(
+        r"\b(?:class|object)\s+" + re.escape(cls) + r"\b", _text(index, f))]
+    files = defining or files
     if len(files) > 1 and "." in name.strip("."):
         package = name.rsplit(".", 1)[0].lstrip(".")
         exact = [f for f in files if re.search(
@@ -299,8 +331,77 @@ def _shared_segments(a: str, b: str) -> int:
     return n
 
 
+SCREEN_SUFFIXES = ("screen", "route", "page", "activity", "fragment", "viewmodel", "content", "view")
+
+
+def _squash(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def match_name(index: dict, key: str) -> list[str]:
+    """Files for one screen name. An exact match wins over a name that only
+    starts with it, which wins over one that merely contains it, so "App" finds
+    App.kt and not every file with App somewhere in its name."""
+    stems = {stem: rels for stem, rels in index.get("all_files", {}).items()}
+    symbols = symbol_index(index)
+    exact, starts, contains = [], [], []
+    wanted = {key} | {key + suffix for suffix in SCREEN_SUFFIXES}
+    for name, rels in list(stems.items()) + list(symbols.items()):
+        low = _squash(name)
+        if low in wanted:
+            exact.extend(rels)
+        elif low.startswith(key):
+            starts.extend(rels)
+        elif key in low:
+            contains.extend(rels)
+    for tier in (exact, starts, contains):
+        hits = [h for h in dict.fromkeys(tier) if _android(h)]
+        if hits:
+            return hits[:12]
+    return []
+
+
+def match_flow(index: dict, entry: str) -> tuple[list[tuple[str, str]], list[str]]:
+    """One --flow entry -> ([(file, the words that matched it)], [words that matched nothing]).
+    An entry may be a name (TripDetail), a path, or a description ("guided setup,
+    then Pairing Device"). A description is tried as a whole,
+    then as runs of neighbouring words, then word by word."""
+    if "/" in entry or entry.endswith((".kt", ".java")):
+        base = os.path.splitext(os.path.basename(entry))[0]
+        same = index.get("all_files", {}).get(base, [])
+        hits = [f for f in same if f.replace("\\", "/").endswith(entry)] or same
+        return [(h, entry) for h in hits if _android(h)][:12], ([] if hits else [entry])
+    whole = _squash(entry)
+    if not whole:
+        return [], []
+    hits = match_name(index, whole)
+    if hits:
+        return [(h, entry) for h in hits], []
+    words = [w for w in re.findall(r"[A-Za-z0-9]+", entry) if w.lower() not in FLOW_NOISE and len(w) > 2]
+    found, used = [], set()
+    for size in (3, 2):
+        for i in range(len(words) - size + 1):
+            if used & set(range(i, i + size)):
+                continue
+            run = words[i:i + size]
+            hits = match_name(index, _squash("".join(run)))
+            if hits:
+                found.extend((h, " ".join(run)) for h in hits)
+                used |= set(range(i, i + size))
+    missed = []
+    for i, word in enumerate(words):
+        if i in used:
+            continue
+        hits = match_name(index, _squash(word)) if len(word) >= 4 else []
+        if hits:
+            found.extend((h, word) for h in hits)
+        else:
+            missed.append(word)
+    return found, (missed if found else [entry])
+
+
 def build_path(index: dict, mode: str, flow: list[str] | None, code_map: dict | None,
-               pkg: str = "") -> dict:
+               pkg: str = "", trace_names: list[str] | None = None) -> dict:
     """Which files ran during the capture, and how each one was chosen."""
     files: dict[str, dict] = {}        # rel -> {"role", "depth", "seed"}
     how, unmatched = [], []
@@ -334,9 +435,11 @@ def build_path(index: dict, mode: str, flow: list[str] | None, code_map: dict | 
     for rel, role in found:
         if add(rel, role, 0, seed=True):
             entry.append((rel, role))
+        elif rel in files and role not in files[rel]["role"]:
+            files[rel]["role"] += ", " + role      # one file, two entry points
     if entry:
         how.append("Entry points from AndroidManifest.xml: " + ", ".join(
-            f"{os.path.basename(rel)} ({role})" for rel, role in entry) + ".")
+            f"{os.path.basename(rel)} ({files[rel]['role']})" for rel, _ in entry) + ".")
     elif manifest["manifests"]:
         how.append("AndroidManifest.xml names no Application class or launcher Activity that "
                    "is a source file in this repo.")
@@ -346,43 +449,46 @@ def build_path(index: dict, mode: str, flow: list[str] | None, code_map: dict | 
 
     named = []
     for name in flow or []:
-        key = re.sub(r"[^a-z0-9]", "", name.lower())
-        if not key:
-            continue
-        hits = []
-        if "/" in name or name.endswith((".kt", ".java")):
-            base = os.path.splitext(os.path.basename(name))[0]
-            same = index.get("all_files", {}).get(base, [])
-            hits = [f for f in same if f.replace("\\", "/").endswith(name)] or same
-        else:
-            for stem, rels in index.get("all_files", {}).items():
-                if key in re.sub(r"[^a-z0-9]", "", stem.lower()):
-                    hits.extend(rels)
-            for sym, rels in symbol_index(index).items():
-                if key == sym.lower() or sym.lower() in (key + "screen", key + "route", key + "page"):
-                    hits.extend(rels)
-        hits = [h for h in dict.fromkeys(hits) if _android(h)][:12]
-        if not hits:
-            unmatched.append(name)
-        for rel in hits:
-            if add(rel, f"flow: {name}", 0, seed=True):
+        hits, missed = match_flow(index, name)
+        unmatched.extend(missed)
+        for rel, words in hits:
+            if add(rel, f"flow: {words}", 0, seed=True):
                 named.append(rel)
-            elif rel in files and not files[rel]["role"].startswith("flow"):
-                files[rel]["role"] += f", flow: {name}"
+            elif rel in files and "flow" not in files[rel]["role"]:
+                files[rel]["role"] += f", flow: {words}"
     if flow:
         how.append(f"Screens named with --flow: {', '.join(flow)} matched {len(named)} "
                    f"file{'' if len(named) == 1 else 's'}."
                    + (f" No file matched: {', '.join(unmatched)}." if unmatched else ""))
 
-    traced = []
+    # What the trace itself names is the only direct evidence of what ran: an
+    # Activity in a lifecycle slice, a composable from composition tracing, a
+    # trace section the app declares.
+    traced, evidence = [], []
     for s in (code_map or {}).get("slices", []):
-        ev = s.get("evidence")
-        if s.get("owner") == "app" and ev:
-            rel = ev.rsplit(":", 1)[0] if re.search(r":\d+$", ev) else ev
-            if add(rel, "named in the trace", 0, seed=True):
-                traced.append(rel)
+        if s.get("owner") == "app" and s.get("evidence"):
+            evidence.append(s["evidence"])
+    if trace_names:
+        try:
+            cmod = _load_code_map()
+            for name in trace_names[:600]:
+                got = cmod.classify(name, index, pkg)
+                if got.get("owner") == "app" and got.get("evidence"):
+                    evidence.append(got["evidence"])
+        except Exception:
+            pass
+    for ev in dict.fromkeys(evidence):
+        rel = ev.rsplit(":", 1)[0] if re.search(r":\d+$", ev) else ev
+        if rel in files and files[rel]["seed"] and "named in the trace" not in files[rel]["role"]:
+            files[rel]["role"] += ", named in the trace"
+        elif add(rel, "named in the trace", 0, seed=True):
+            traced.append(rel)
     if traced:
-        how.append(f"{len(traced)} file{'' if len(traced) == 1 else 's'} named by slices in the trace.")
+        how.append(f"{len(traced)} more file{'' if len(traced) == 1 else 's'} named by slices in "
+                   f"the trace: an app class, a file and line, or a trace section the app declares.")
+    elif trace_names is not None and mode != "startup":
+        how.append("No slice in the trace names an app class or one of its trace sections, so "
+                   "the trace itself does not say which screens ran.")
 
     # What the entry files refer to, two steps out. A reference is not proof the
     # code ran, so each file keeps how far it is from an entry point.
@@ -401,7 +507,7 @@ def build_path(index: dict, mode: str, flow: list[str] | None, code_map: dict | 
     if reached:
         how.append(f"{reached} more file{'' if reached == 1 else 's'} that those refer to, up to "
                    f"two steps out. A reference is not proof the code ran.")
-    if mode != "startup" and not flow:
+    if mode != "startup" and not flow and not traced:
         how.append("This was not a cold-start capture and no screens were named, so the "
                    "screens that were driven are not known. Pass --flow with their names.")
     return {"files": files, "how": how, "flow": flow or [], "unmatched_flow": unmatched,
@@ -437,9 +543,24 @@ def _scan(index: dict, rel: str, check: dict) -> list[dict]:
             if re.search(r"\bkey\s*=", following):
                 continue
         hit = {"file": rel, "line": i + 1, "code": redact(stripped), "match": m.group(0)[:60]}
+        # Debug-only when the check is on the same line, or opens a block just
+        # above that has not closed yet. `if (DEBUG) x()` on the line before
+        # says nothing about this line.
+        guarded = bool(DEBUG_ONLY.search(stripped))
+        for back in range(1, 4):
+            if guarded or i - back < 0:
+                break
+            above = lines[i - back].strip()
+            if above.startswith("}"):
+                break
+            guarded = bool(DEBUG_ONLY.search(above)) and above.endswith("{")
+        if guarded:
+            hit["debug_only"] = True
+            hit["note"] = ("Guarded by a debug check, so it should not run in a release "
+                           "build. Confirm, then drop it.")
         before = " ".join(lines[max(0, i - 6):i + 1])
         if check["id"] in ("blocking_call", "system_call", "telephony_call",
-                           "disk_or_parse_on_start") and OFF_MAIN.search(before):
+                           "disk_or_parse_on_start") and "note" not in hit and OFF_MAIN.search(before):
             hit["note"] = ("A background dispatcher or thread is named just above, so this "
                            "may already be off the main thread.")
         hits.append(hit)
@@ -598,13 +719,13 @@ def repo_checks(index: dict, kinds: set, mode: str, path: dict) -> list[dict]:
 
 def audit(index: dict, findings: list, mode: str = "unknown", flow: list[str] | None = None,
           code_map: dict | None = None, binder_servers: list[str] | None = None,
-          pkg: str = "") -> dict:
+          pkg: str = "", trace_names: list[str] | None = None) -> dict:
     """findings as triage.py makes them -> the audit. Never raises on odd input."""
     by_kind = {}
     for f in findings or []:
         by_kind.setdefault(f.get("kind") or "other", f)
     kinds = set(by_kind)
-    path = build_path(index, mode, flow, code_map, pkg)
+    path = build_path(index, mode, flow, code_map, pkg, trace_names)
     files = path["files"]
     seeds = [r for r, m in files.items() if m["seed"]]
     order = sorted(files, key=lambda r: (files[r]["depth"], not files[r]["seed"]))
@@ -636,7 +757,8 @@ def audit(index: dict, findings: list, mode: str = "unknown", flow: list[str] | 
             clean.append(check["title"])
             continue
         # likely-on-main first, then nearest to an entry point
-        hits.sort(key=lambda h: ("note" in h, files.get(h["file"], {"depth": 9})["depth"]))
+        hits.sort(key=lambda h: (bool(h.get("debug_only")), "note" in h,
+                                 files.get(h["file"], {"depth": 9})["depth"]))
         for h in hits[:MAX_PER_CHECK]:
             items.append({"check": check["id"], "title": check["title"], **h,
                           "why": check["why"], "fix": check["fix"], "plan": check["plan"],

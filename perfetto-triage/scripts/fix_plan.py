@@ -63,7 +63,8 @@ FIXES = {
                    "Or capture again with capture.sh, whose config records the package list"],
         "check": ["build type is release"]},
     "no_frametimeline": {
-        "stage": "capture", "title": "Record again with the frame timeline data source",
+        "stage": "capture", "by_severity": True,
+        "title": "Record again with the frame timeline data source",
         "change": ["Capture with capture.sh, whose config includes android.surfaceflinger.frametimeline",
                    "Without it late frames cannot be attributed to the app or the compositor"],
         "check": ["coverage: frametimeline is ok"]},
@@ -184,6 +185,14 @@ FIXES = {
         "change": ["Split it into smaller trace sections to find the expensive part",
                    "Fix that part, then measure the section again"],
         "check": []},     # filled in with the section name
+    "always_animating": {
+        "stage": "fix", "title": "Stop the animation that runs when nothing is happening",
+        "change": ["Find it first: capture with composition tracing on, or remove suspects one at a "
+                   "time and watch the frame count",
+                   "A loading indicator or shimmer must leave the composition when loading ends",
+                   "Pause infinite animations while the screen is covered, scrolled away or in the background",
+                   "An idle screen should draw no frames at all"],
+        "check": ["frames"]},
     "handoff_compose-expert": {
         "stage": "fix", "title": "Reduce the Compose work that runs every frame",
         "change": ["Use the compose-expert skill to find what recomposes or animates on every frame",
@@ -257,11 +266,13 @@ def build(findings: list, health: dict | None = None, code_map: dict | None = No
                           if it.get(k) is not None})
         if cands:
             # likely-on-main-thread first, and no more than six on a card
-            cands.sort(key=lambda c: "note" in c)
+            cands.sort(key=lambda c: ("not known to be on the path" in (c.get("on_path") or ""),
+                                      "note" in c))
             item["candidates"] = cands[:6]
             if len(cands) > 6:
                 item["candidates_more"] = len(cands) - 6
-        if fix["stage"] == "capture":
+        if fix["stage"] == "capture" and not (
+                fix.get("by_severity") and SEV.get(item["finding_severity"], 3) >= 3):
             item["priority"] = "first"
         elif (fix["stage"] == "measure" and not fix.get("by_severity")) \
                 or SEV.get(item["finding_severity"], 3) <= 2:

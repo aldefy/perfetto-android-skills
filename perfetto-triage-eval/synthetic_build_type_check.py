@@ -66,7 +66,7 @@ def triage(tmp, label, debuggable):
     out = os.path.join(tmp, f"out-{label}")
     with open(trace, "wb") as fh:
         fh.write(trace_bytes(debuggable))
-    subprocess.run([sys.executable, TRIAGE_PY, trace, "--pkg", PKG, "--out", out],
+    subprocess.run([sys.executable, TRIAGE_PY, trace, "--pkg", PKG, "--out", out, "--no-open"],
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     with open(os.path.join(out, "findings.json")) as fh:
         return json.load(fh)

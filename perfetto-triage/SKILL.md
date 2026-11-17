@@ -62,7 +62,15 @@ scripts/capture.sh com.example.app --stop
 ```
 
 The trace then covers exactly the flow. A fixed window either cuts the end
-off or pads the trace with idle time, and both skew the frame counts.
+off or pads the trace with idle time, and both skew the frame counts. `--stop`
+finds the running capture from any folder and with any `OUTDIR`, and puts the
+trace where `--start` said it would.
+
+Beside every trace `capture.sh` writes a note with the same name ending
+`.capture.txt`: the phone's SDK level and how the app is compiled
+(`speed-profile`, `verify` and so on). Keep the two files together. Triage reads the note, because an Android 10 trace does
+not say which Android version it came from, and no trace says how the app was
+compiled. For a trace captured some other way, pass `--sdk 29` to triage.
 
 `capture.sh` checks the package flags first and exits 3 on a `debuggable`
 build. Do not work around that by default: get a release-like build. If debug
@@ -139,11 +147,15 @@ pack in `queries/`, and writes:
   capture, read for causes that match the findings (Step 4)
 - `triage-out/progress.txt` — one line saying what triage is doing right now
 
-Tell the person where to look before you start a long run. From the first
-second `report.html` is a small status page that reloads itself and shows the
-current step; it becomes the report when the run finishes. `progress.txt` is
-the same thing in one line. Do not make them ask you whether it is still
-analysing.
+`report.html` opens in the person's browser as soon as triage starts. From the
+first second it is a small status page that reloads itself and shows the
+current step, and it becomes the report when the run finishes. `progress.txt`
+is the same thing in one line. Do not make them ask you whether it is still
+analysing, and do not make them go and find the file.
+
+When you triage several traces in a row, pass `--no-open` to all but the one
+you want them to read (usually the median run), or they get a tab per trace.
+On a machine with no screen nothing opens: give them the path or a link.
 
 `report.html` is what you show the person. It asks the four questions in
 order and answers each with a chart drawn from the query results: the main
@@ -274,10 +286,21 @@ python3 scripts/triage.py trace.pftrace --pkg com.example.app \
     --app-repo /path/to/app --flow Home,TripDetail,Checkout
 ```
 
-  Use the screen names as they appear in the code. Each name is matched to
-  source files, and the ones that match nothing are reported. If you scripted
-  the flow, you already know this list: pass it every time.
-- Any app class or file the trace itself names is added.
+  Use the screen names as they appear in the code. A name that matches a file
+  or a composable exactly wins over one that only contains it, so `Home` finds
+  `HomeScreen.kt` and not every file with Home in its name. A description
+  works too ("guided setup, then Pairing Device"): it is split into
+  the screens it names. Whatever matches nothing is reported, so check that
+  list. If you scripted the flow, you already know the screens: pass them
+  every time.
+- Every app class, file and trace section the trace itself names is added, and
+  marked "named in the trace". This is the only direct evidence of what ran. It
+  needs readable names: an Activity in a lifecycle slice, composition tracing,
+  or the app's own trace sections.
+
+If a screen you know ran is missing from the list in `code_audit.md`, the audit
+did not read it. Add it with `--flow` and run triage again before you conclude
+anything about that screen.
 
 The audit then checks those files against the findings. Each check runs only
 when a finding asks for it: system-service and telephony calls when the trace
@@ -289,7 +312,8 @@ sections when the app has none.
 
 Every item is a candidate. It is a pattern match in source: it cannot see
 which thread a line runs on, or whether the line ran at all. A line with a
-background dispatcher just above it is flagged as probably fine. Before you
+background dispatcher just above it is flagged as probably fine, and a line
+inside a debug check is flagged as not running in a release build. Before you
 tell the person something is the cause:
 
 1. Open the file and read the function around the line.
@@ -432,6 +456,13 @@ stems its numbers came from, re-checkable in `csv/<stem>.csv`. That part is
 measured. The cause you propose and the fix you recommend are inferences, so
 say so. When the trace cannot answer the question, the answer is "unknown",
 with the reason, not a guess.
+
+Do not stop at the report. A table of findings is not what the person came
+for. Unless they asked for a diagnosis only, the next thing you do after triage
+is Step 4 and Step 5: read the top candidates, say which one you would fix
+first and why, name the file and line, and ask to make that change. If they
+asked you to fix it, make it, then measure it (Step 6). End every triage reply
+with that next action, not with a summary of the tables.
 
 ## Hard rules
 
