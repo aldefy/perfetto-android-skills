@@ -13,6 +13,9 @@ Outputs into --out (default ./triage-out):
                  agent to act on
   report.html    the same findings as a page for a person: charts in the
                  Perfetto UI's colours, each with a plain explanation
+  fix_plan.md    suggested fixes in order, for an agent to review before it
+                 changes anything (also `fix_plan` in findings.json)
+  progress.txt   one line saying what triage is doing right now
   csv/*.csv      raw result of every query
 
 No third-party dependencies. Downloads trace_processor on first run.
@@ -72,11 +75,78 @@ def ensure_tp(explicit: str | None) -> str:
     return dest
 
 
+STATUS = None   # set by main(): where the live status files go
+
+
 def log(msg: str) -> None:
     """One progress line on stderr, flushed, so a caller tailing the output
-    always sees what triage is doing right now."""
+    always sees what triage is doing right now. The same line also goes to the
+    live status files, because the person waiting usually cannot see stderr."""
     sys.stderr.write(f"[triage] {msg}\n")
     sys.stderr.flush()
+    if STATUS is not None:
+        STATUS.update(msg)
+
+
+class Status:
+    """Where triage is right now, written to disk on every progress line.
+
+      <out>/progress.txt   one line: what is running and for how long
+      <out>/report.html    a small status page that reloads itself, replaced
+                           by the real report when the run finishes
+
+    So "is it still analysing or is it writing the report?" can be answered by
+    opening a file instead of asking whoever started the run."""
+
+    def __init__(self, out_dir: str, trace: str, html: bool = True):
+        self.out_dir, self.trace, self.html = out_dir, os.path.basename(trace), html
+        self.started = time.time()
+        self.lines: list[str] = []
+        self.state = "running"
+
+    def elapsed(self) -> str:
+        secs = int(time.time() - self.started)
+        return f"{secs // 60}m {secs % 60:02d}s" if secs >= 60 else f"{secs}s"
+
+    def update(self, msg: str, state: str | None = None):
+        if state:
+            self.state = state
+        self.lines = (self.lines + [msg])[-12:]
+        try:
+            with open(os.path.join(self.out_dir, "progress.txt"), "w") as fh:
+                fh.write(f"{self.state}: {msg} ({self.elapsed()} elapsed)\n")
+            if self.html and self.state != "done":
+                with open(os.path.join(self.out_dir, "report.html"), "w", encoding="utf-8") as fh:
+                    fh.write(self.page(msg))
+        except OSError:
+            pass    # status is a courtesy; never let it break a run
+
+    def page(self, msg: str) -> str:
+        import html as _html
+        e = _html.escape
+        failed = self.state == "failed"
+        head = "Triage failed" if failed else "Triage is running"
+        note = ("The run stopped before a report was written. The last lines are below."
+                if failed else
+                "This page reloads every 5 seconds and becomes the report when the run "
+                "finishes. If it does not reload by itself, reload it by hand.")
+        log_lines = "".join(f"<li>{e(x)}</li>" for x in self.lines)
+        refresh = "" if failed else '<meta http-equiv="refresh" content="5">'
+        return (
+            '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width,initial-scale=1">'
+            f'{refresh}<title>{e(head)}</title><style>'
+            ':root{color-scheme:light dark}body{margin:0;font:16px/1.55 system-ui,-apple-system,'
+            '"Segoe UI",Roboto,sans-serif;background:#f5f6f8;color:#14171c}'
+            'main{max-width:760px;margin:0 auto;padding:40px 20px}h1{font-size:26px;margin:0 0 4px}'
+            '.now{font-size:19px;margin:18px 0 6px;font-weight:600;overflow-wrap:anywhere}'
+            '.meta,.note{color:#5b6470;font-size:14px}ol{font:13px/1.6 ui-monospace,Menlo,Consolas,'
+            'monospace;color:#5b6470;padding-left:22px;overflow-wrap:anywhere}'
+            '@media (prefers-color-scheme:dark){body{background:#0e1014;color:#e8eaee}'
+            '.meta,.note,ol{color:#9aa3ae}}</style></head><body><main>'
+            f'<h1>{e(head)}</h1><p class="meta">trace {e(self.trace)} · {e(self.elapsed())} elapsed</p>'
+            f'<p class="now">{e(msg)}</p><p class="note">{note}</p>'
+            f'<ol>{log_lines}</ol></main></body></html>')
 
 
 class Heartbeat:
@@ -238,10 +308,10 @@ def leading_comment(sql_path: str) -> str:
     lines = []
     with open(sql_path) as fh:
         for line in fh:
-            if line.startswith("--"):
-                lines.append(line[2:].strip())
-            else:
+            text = line[2:].strip() if line.startswith("--") else None
+            if not text:        # the description is the first comment paragraph
                 break
+            lines.append(text)
     return " ".join(lines)
 
 
@@ -369,6 +439,45 @@ def health_status(results: dict, pkg: str, mode: str = "unknown") -> dict:
     return hs
 
 
+# A finding's kind is its stable identity. Titles carry live numbers and can be
+# reworded; the kind is what fix_plan.py and other tools key on.
+KINDS = [
+    (r"^Trace has errors", "trace_errors"),
+    (r"^Debuggable build", "debuggable_build"),
+    (r"^Build type not verified", "build_unknown"),
+    (r"^No FrameTimeline data", "no_frametimeline"),
+    (r"^No kernel blocking reasons", "no_blocked_reasons"),
+    (r"^No scheduler data", "no_sched"),
+    (r"^Startup capture missed", "startup_missed"),
+    (r"^No app launch found", "startup_not_found"),
+    (r"^Cold start TTID is", "slow_cold_start"),
+    (r" start TTID is ", "slow_start"),
+    (r"never calls reportFullyDrawn", "no_ttfd"),
+    (r"^Startup time is dominated by", "startup_dominated"),
+    (r"^Startup is waiting-bound", "startup_waiting"),
+    (r"^Startup is compute-bound", "startup_compute"),
+    (r"^Startup is mixed", "startup_mixed"),
+    (r"classes loaded during startup", "class_loading"),
+    (r"frames janky \(", "jank_rate"),
+    (r"cost is split between", "jank_split"),
+    (r"cost is on the RenderThread", "jank_render"),
+    (r"cost is on the UI thread", "jank_ui"),
+    (r"^Shader / pipeline compilation", "shader_compile"),
+    (r"^Measure/layout/traversal cost", "layout_cost"),
+    (r"^Main-thread binder", "main_binder"),
+    (r"^Slow binder calls are queueing", "binder_queueing"),
+    (r"blocked on a lock", "lock_contention"),
+    (r"ANR\(s\) recorded", "anr"),
+]
+
+
+def kind_of(title: str) -> str:
+    for pattern, kind in KINDS:
+        if re.search(pattern, title):
+            return kind
+    return "other"
+
+
 def analyse(results: dict, pkg: str, mode: str = "unknown",
             status: dict | None = None) -> list[dict]:
     """results: {query_stem: (header, rows)}. Returns ordered findings."""
@@ -378,7 +487,7 @@ def analyse(results: dict, pkg: str, mode: str = "unknown",
     src = []  # query stems the next finding is derived from
 
     def add(severity, area, title, detail, action, source=None):
-        f.append({"severity": severity, "area": area, "title": title,
+        f.append({"severity": severity, "area": area, "kind": kind_of(title), "title": title,
                   "detail": detail, "action": action,
                   "source": list(source if source is not None else src)})
 
@@ -460,6 +569,25 @@ def analyse(results: dict, pkg: str, mode: str = "unknown",
     # --- 1. Startup -------------------------------------------------------
     startups = [r for r in table("10_startup_summary")
                 if pkg in ("*", "") or _glob(r.get("package", ""), pkg)]
+    # The findings below describe HOW startup spends its time. How much that
+    # matters depends on how long startup is: the same 55% waiting is urgent in
+    # a 3 s start and polish in a 220 ms one. So they are capped by the TTID.
+    srank = {"high": 1, "medium": 2, "info": 3}
+    ttids = [num(r.get("ttid_ms")) for r in startups if num(r.get("ttid_ms"))]
+    slowest = max(ttids) if ttids else None
+    start_cap = (None if slowest is None or slowest > 1000
+                 else "medium" if slowest > 500 else "info")
+    start_ctx = ("" if start_cap is None else
+                 f" Startup is {slowest:.0f} ms to first frame, "
+                 + ("under the 500 ms this report flags, so this is information, not a problem."
+                    if start_cap == "info" else
+                    "under 1 s, so this is capped at medium."))
+
+    def scap(sev):
+        if start_cap is None or sev not in srank:
+            return sev
+        return sev if srank[sev] >= srank[start_cap] else start_cap
+
     for s in startups:
         ttid = num(s.get("ttid_ms"))
         kind = s.get("startup_type")
@@ -500,8 +628,8 @@ def analyse(results: dict, pkg: str, mode: str = "unknown",
             "launch_delay": "Time before the app process got going: process fork, system_server "
                             "queueing, or a cold page cache. Rarely fixable in app code.",
         }.get(top[0][0], "Dig into the dominant reason below.")
-        add("high" if top[0][1] > 100 else "info", "startup",
-            f"Startup time is dominated by '{top[0][0]}'", detail, hint)
+        add(scap("high" if top[0][1] > 100 else "info"), "startup",
+            f"Startup time is dominated by '{top[0][0]}'", detail + "." + start_ctx, hint)
 
     mts = table("12_startup_main_thread_state")
     if mts:
@@ -516,21 +644,21 @@ def analyse(results: dict, pkg: str, mode: str = "unknown",
             mix = ", ".join(f"{k} {v:.0f} ms"
                             for k, v in sorted(agg.items(), key=lambda kv: -kv[1]))
             if pct_wait > 55:
-                add("high", "startup",
-                    f"Startup is WAITING-bound — main thread waits {pct_wait:.0f}% of the time",
-                    f"Running {running:.0f} ms vs waiting {waiting:.0f} ms ({mix}).",
+                add(scap("high"), "startup",
+                    f"Startup is waiting-bound: main thread waits {pct_wait:.0f}% of the time",
+                    f"Running {running:.0f} ms vs waiting {waiting:.0f} ms ({mix})." + start_ctx,
                     "Optimising your own code will barely move this. The win is in what the "
                     "thread is waiting ON: binder/IPC, disk IO, or a lock. Go to those sections.")
             elif pct_wait < 45:
-                add("high" if running > 400 else "info", "startup",
-                    f"Startup is COMPUTE-bound — main thread runs {100 - pct_wait:.0f}% of the time",
-                    f"Running {running:.0f} ms vs waiting {waiting:.0f} ms ({mix}).",
+                add(scap("high" if running > 400 else "info"), "startup",
+                    f"Startup is compute-bound: main thread runs {100 - pct_wait:.0f}% of the time",
+                    f"Running {running:.0f} ms vs waiting {waiting:.0f} ms ({mix})." + start_ctx,
                     "Your code, class loading, or JIT is the cost. Baseline Profiles and "
                     "deferring init work off the critical path are the levers.")
             else:
-                add("medium", "startup",
-                    f"Startup is mixed — {100 - pct_wait:.0f}% running, {pct_wait:.0f}% waiting",
-                    f"Running {running:.0f} ms vs waiting {waiting:.0f} ms ({mix}).",
+                add(scap("medium"), "startup",
+                    f"Startup is mixed: {100 - pct_wait:.0f}% running, {pct_wait:.0f}% waiting",
+                    f"Running {running:.0f} ms vs waiting {waiting:.0f} ms ({mix})." + start_ctx,
                     "Attack both: shave the biggest running slice AND the biggest blocking "
                     "call. Re-measure after each, separately.")
 
@@ -541,11 +669,11 @@ def analyse(results: dict, pkg: str, mode: str = "unknown",
         if ms < 10 and n < 300:
             continue
         sev = "high" if ms > 40 else "medium" if ms > 15 else "info"
-        add(sev, "startup",
+        add(scap(sev), "startup",
             f"{int(n)} classes loaded during startup, {ms:.0f} ms on the critical path",
             f"startup_id={r.get('startup_id')} ({r.get('package', '')}). Note this "
             "counts explicit class-load slices only; JIT and verification cost sits "
-            "in the running time above.",
+            "in the running time above." + start_ctx,
             "This is the clearest Baseline Profile signal there is. Generate one with "
             "BaselineProfileRule, then prove the win by benchmarking "
             "CompilationMode.None() against "
@@ -738,7 +866,7 @@ def related_skills(results: dict) -> tuple[list[dict], list[dict]]:
         handoffs.append({"skill": rel["skill"], "repo": rel["repo"], "covers": rel["covers"],
                          "install": rel["install"], "slices": [n for n, _ in top[:8]]})
         found.append({
-            "severity": "info", "area": "code",
+            "severity": "info", "area": "code", "kind": "handoff_" + rel["skill"],
             "title": f"{rel['what']} ranks in this trace: the fix belongs to {rel['skill']}",
             "detail": "Slices: " + ", ".join(f"{n} ({v:.0f} ms)" for n, v in top[:5])
                       + f". About {total:.0f} ms across them. The trace shows how much this "
@@ -757,7 +885,7 @@ def unfinished_findings(errors: dict) -> list[dict]:
     for stem, err in sorted(errors.items()):
         timed_out = err.startswith("timed out")
         out.append({
-            "severity": "blocker", "area": "trace",
+            "severity": "blocker", "area": "trace", "kind": "query_unfinished",
             "title": f"Query {stem} did not finish",
             "detail": (f"It {err}. " if timed_out else
                        f"It failed: {err.splitlines()[-1][:200]}. ")
@@ -866,6 +994,9 @@ def main():
 
     tp = ensure_tp(args.tp)
     os.makedirs(os.path.join(args.out, "csv"), exist_ok=True)
+    global STATUS
+    STATUS = Status(args.out, args.trace, html=not args.no_html)
+    log(f"starting. Live status: {os.path.join(args.out, 'report.html') if not args.no_html else os.path.join(args.out, 'progress.txt')}")
     tmpdir = os.path.join(args.out, ".sql")
     os.makedirs(tmpdir, exist_ok=True)
 
@@ -948,9 +1079,20 @@ def main():
             log(f"code map skipped: {exc}")
     findings = sorted(findings + extra, key=lambda x: order.get(x["severity"], 9))
 
+    plan, plan_md = None, ""
+    try:  # suggestions on top of the findings; they must never fail a triage
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("fix_plan", os.path.join(HERE, "fix_plan.py"))
+        fmod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fmod)
+        plan = fmod.build(findings, status, code_map, handoffs)
+        plan_md = fmod.to_markdown(plan)
+    except Exception as exc:
+        log(f"fix plan skipped: {exc}")
+
     # ---- report.md
     icon = {"blocker": "🛑", "high": "🔴", "medium": "🟠", "info": "🔵"}
-    out = [f"# Perfetto triage — `{os.path.basename(args.trace)}`", ""]
+    out = [f"# Perfetto triage: `{os.path.basename(args.trace)}`", ""]
     out.append(f"Package filter: `{args.pkg}`  ·  capture mode: `{mode}`  ·  "
                f"trace_processor {TP_VERSION}")
     out.append("")
@@ -975,6 +1117,9 @@ def main():
                        + " (see Evidence, and `csv/`).")
             out.append("")
         out.append(f"**What to do:** {f['action']}")
+        out.append("")
+    if plan_md:
+        out.append(plan_md)
         out.append("")
     if code_map and code_map.get("checked"):
         out.append("## Whose code")
@@ -1027,8 +1172,11 @@ def main():
             out.append("")
 
     report = os.path.join(args.out, "report.md")
-    log("writing report.md and findings.json")
+    log("writing report.md, findings.json and fix_plan.md")
     open(report, "w").write("\n".join(out))
+    if plan:
+        with open(os.path.join(args.out, "fix_plan.md"), "w") as fh:
+            fh.write(fmod.to_markdown(plan, "# Suggested fixes") + "\n")
     with open(os.path.join(args.out, "findings.json"), "w") as fh:
         payload = {"trace": args.trace, "pkg": args.pkg, "mode": mode,
                    "health_status": status, "findings": findings}
@@ -1036,6 +1184,8 @@ def main():
             payload["code_map"] = code_map
         if handoffs:
             payload["handoffs"] = handoffs
+        if plan:
+            payload["fix_plan"] = plan
         json.dump(payload, fh, indent=2)
 
     visual = None
@@ -1050,11 +1200,16 @@ def main():
             visual = vr.write(args.out, app_repo=args.app_repo)
         except Exception as exc:
             log(f"visual report skipped: {exc}")
-    log(f"done in {time.time() - started:.0f}s")
+    final = f"done in {time.time() - started:.0f}s. {len(findings)} findings, trust: {status['verdict']}"
+    if STATUS is not None:
+        STATUS.state = "done"
+    log(final)
 
     print(f"\nTrust: {status['verdict']}"
           + (f" ({'; '.join(status['reasons'])})" if status["reasons"] else ""))
     print(f"{len(findings)} finding(s). Report: {report}")
+    if plan:
+        print(f"Fix plan: {os.path.join(args.out, 'fix_plan.md')}. {plan['summary']}")
     if visual:
         print(f"Visual report: {visual}")
     for f in findings[:8]:
@@ -1062,4 +1217,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BaseException as exc:   # leave a truthful status behind, then fail as before
+        if STATUS is not None and STATUS.state == "running" and not (
+                isinstance(exc, SystemExit) and exc.code in (0, None)):
+            STATUS.update(f"stopped: {type(exc).__name__}: {str(exc)[:300]}", state="failed")
+        raise

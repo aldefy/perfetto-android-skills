@@ -94,8 +94,12 @@ def test_app_class_inside_a_framework_slice():
     index = cm.scan_repo(tree(APP))
     r = owner("performCreate:com.example.app.MainActivity", index)
     assert r["how"] == "app class" and r["evidence"].endswith("MainActivity.kt"), r
-    assert owner("performCreate:com.other.app.MainActivity", index)["owner"] == "other"
-    assert owner("performCreate:com.example.app.MainActivity", index, pkg="*")["owner"] == "other"
+    assert owner("performCreate:com.other.app.MainActivity", index)["owner"] == "other", \
+        "same class name in another package is not the app's"
+    # the applicationId often carries a suffix the code's package does not
+    for pkg in ("com.example.app.staging", "*", ""):
+        r = owner("performCreate:com.example.app.MainActivity", index, pkg=pkg)
+        assert r["owner"] == "app", pkg
 
 
 def test_framework_names_are_never_claimed():
@@ -153,7 +157,8 @@ def test_finding_lists_the_apps_own_slices():
 
 
 def test_lifecycle_only_match_still_asks_for_trace_sections():
-    repo = tree({"app/src/main/java/com/example/app/MainActivity.kt": "class MainActivity\n"})
+    repo = tree({"app/src/main/java/com/example/app/MainActivity.kt":
+                 "package com.example.app\nclass MainActivity\n"})
     out = cm.build(results([("performCreate:com.example.app.MainActivity", 40),
                             ("traversal", 900)]), repo, PKG)
     f = cm.findings(out)

@@ -187,6 +187,7 @@ FRAME = {
     "dropped": ("Dropped", "#03a9f4"),
     "unknown": ("Late, cause unknown", "#f515e0"),
     "ok": ("On time", "#4caf50"),
+    "unflagged": ("Late, not flagged as jank", "#9aa0a6"),
 }
 
 
@@ -551,8 +552,11 @@ def frames_chart(frames: list[dict]) -> str:
         over = num(f.get("overrun_ms"))
         if over is None or over <= 0:
             continue
+        key = frame_key(f.get("jank_type", ""))
+        # This chart only lists frames that overran, so "no jank type" here means
+        # the system did not class the overrun as jank, not that it was on time.
         rows.append((f.get("frame_id", "?"), over, num(f.get("ui_ms")),
-                     frame_key(f.get("jank_type", "")), f.get("jank_type", "")))
+                     "unflagged" if key == "ok" else key, f.get("jank_type", "")))
     if not rows:
         return ""
     top = max(r[1] for r in rows)
@@ -702,7 +706,7 @@ def q2_thread_state(out_dir: str, pkg: str) -> str:
     startup = read_csv(out_dir, "12_startup_main_thread_state")
     whole = read_csv(out_dir, "33_main_thread_blocking")
 
-    def chart(rows, name_key, title, scope):
+    def chart(rows, name_key, title, scope, whole_trace=False):
         agg: dict[str, float] = {}
         for r in rows:
             v = num(r.get("ms") if "ms" in r else r.get("total_ms"))
@@ -715,7 +719,15 @@ def q2_thread_state(out_dir: str, pkg: str) -> str:
         segs = [(STATE[k][0], agg[k], STATE[k][1]) for k in order if k in agg]
         run = agg.get("running", 0)
         wait = total - run - agg.get("runnable", 0)
-        if run >= total / 2:
+        if whole_trace:
+            blocked = agg.get("io", 0) + agg.get("blocked", 0)
+            means = (f"Over a whole capture the main thread is expected to sleep between "
+                     f"frames and while it waits for input, so the sleeping share here is not "
+                     f"a problem by itself. What to read is how much it ran ({ms(run)}, "
+                     f"{pct(run, total)}), how long it was ready with no CPU free "
+                     f"({ms(agg.get('runnable', 0))}), and how long it was blocked in the kernel "
+                     f"({ms(blocked)}).")
+        elif run >= total / 2:
             means = (f"The main thread was executing code for {pct(run, total)} of {scope}. "
                      f"The cost is work the app is doing, so the slices it was running are "
                      f"the place to look.")
@@ -723,7 +735,7 @@ def q2_thread_state(out_dir: str, pkg: str) -> str:
             means = (f"The main thread was on a CPU for only {pct(run, total)} of {scope} and "
                      f"blocked or asleep for {pct(wait, total)}. Profiling the app's own code "
                      f"will not find that time. Look at what the thread was waiting for.")
-        if agg.get("runnable", 0) > total * 0.15:
+        if not whole_trace and agg.get("runnable", 0) > total * 0.15:
             means += (f" It also spent {pct(agg['runnable'], total)} ready to run with no CPU "
                       f"free, which points at CPU contention, not at this code.")
         return figure(title,
@@ -739,11 +751,11 @@ def q2_thread_state(out_dir: str, pkg: str) -> str:
     mine = [r for r in whole if r.get("process_name") == proc]
     if mine:
         parts.append(chart(mine, "state", f"Main thread over the whole trace ({proc})",
-                           "the trace"))
+                           "the trace", whole_trace=True))
         blocked = [(r.get("blocked_function"), num(r.get("total_ms")), r.get("state"))
                    for r in mine if r.get("blocked_function") not in (None, "", "-", NULL)]
         blocked = sorted([b for b in blocked if b[1]], key=lambda b: -b[1])[:5]
-        if blocked:
+        if blocked and sum(b[1] for b in blocked) >= 20:      # under 20 ms is not worth a chart
             parts.append(figure("Kernel functions the main thread was blocked in",
                                 "Where uninterruptible waits happened, by total time.",
                                 bar_chart([(b[0], b[1], b[2]) for b in blocked],
@@ -783,15 +795,19 @@ def q3_frames(out_dir: str, pkg: str, hs: dict | None) -> str:
             ("Late, system at fault", sf, FRAME["system"][1]),
             ("Late, other cause", other, FRAME["unknown"][1])]
     mix_chart = strip_chart(segs, "Frames by outcome", fmt=lambda v: f"{v:.0f} frame" + ("" if round(v) == 1 else "s"))
+    rate = 100.0 * janky / frames if frames else 0.0
+    low = ("" if rate >= 1 else
+           " That is under 1% of frames, which is a low rate: treat what follows as polish, "
+           "not as a problem to chase.")
     if janky:
         if app >= sf and app > 0:
             means = (f"{janky:.0f} of {frames:.0f} frames were late. The frame timeline blames the "
                      f"app for {app:.0f} of them and the system compositor for {sf:.0f}, so the "
-                     f"app's own frame work is the first place to look.")
+                     f"app's own frame work is the first place to look." + low)
         elif sf > app:
             means = (f"{janky:.0f} of {frames:.0f} frames were late, and the frame timeline blames "
                      f"the system compositor for more of them ({sf:.0f}) than the app ({app:.0f}). "
-                     f"Reading the app's code will not explain those.")
+                     f"Reading the app's code will not explain those." + low)
         else:
             means = (f"{janky:.0f} of {frames:.0f} frames were late, and the frame timeline does "
                      f"not attribute them to the app or to the compositor.")
@@ -972,6 +988,43 @@ def q4_time(out_dir: str, pkg: str, hs: dict | None, cm: dict | None = None) -> 
     return body or '<p class="empty">No startup, slice or binder data for this process.</p>'
 
 
+def fix_section(plan: dict | None) -> str:
+    """Suggested fixes, in the order to review them."""
+    if not plan:
+        return ""
+    out = [f'<p class="lead">{esc(plan.get("summary", ""))}</p>']
+    items = plan.get("items") or []
+    if not items:
+        return "".join(out)
+    out.append('<details class="review"><summary>Before acting on any of these</summary><ol>'
+               + "".join(f"<li>{esc(step)}</li>" for step in plan.get("review", []))
+               + "</ol></details>")
+    labels = {"first": "Do first: the capture", "next": "Review next", "later": "Can wait"}
+    current = None
+    for item in items:
+        if item.get("priority") != current:
+            current = item.get("priority")
+            out.append(f"<h3 class='sub'>{esc(labels.get(current, ''))}</h3>")
+        where = (", ".join(f"<code>{esc(w)}</code>" for w in item.get("where") or [])
+                 or esc(item.get("where_hint") or
+                        "not known from the trace. Map the slices to code first."))
+        also = "".join(f'<p class="src">Also: {esc(x)}</p>' for x in item.get("also_because") or [])
+        skill = (f'<span class="tag">skill: {esc(item["skill"])}</span>' if item.get("skill") else "")
+        wait = (f'<p class="src">{esc(item["why_later"])}</p>' if item.get("why_later") else "")
+        hold = ('<p class="src">Do not act on this until the capture is fixed.</p>'
+                if item.get("blocked_by_capture") else "")
+        check = (f'<p><b>Check.</b> {esc(", ".join(item.get("check") or []))}</p>'
+                 if item.get("check") else "")
+        out.append(
+            f'<article class="finding fix p-{esc(str(current))}"><header>'
+            f'<span class="qn">{esc(str(item.get("n", "")))}</span>{skill}'
+            f'<h4>{esc(item.get("title", ""))}</h4></header>'
+            f'<p class="src">Because: {esc(item.get("because", ""))}</p>{also}{wait}{hold}'
+            f'<ul class="steps">{"".join(f"<li>{esc(c)}</li>" for c in item.get("change") or [])}</ul>'
+            f'<p><b>Where.</b> {where}</p>{check}</article>')
+    return "".join(out)
+
+
 # --------------------------------------------------------------------------
 # page
 # --------------------------------------------------------------------------
@@ -1014,6 +1067,11 @@ figcaption .how,.how{color:var(--muted);font-size:14px;margin:0 0 10px}
 .bar-fill{display:block;height:100%;min-width:2px;background:var(--accent);border-radius:3px}
 .bar-val{white-space:nowrap;font-variant-numeric:tabular-nums;font-weight:600}
 .bar-val i{font-style:normal;font-weight:400;color:var(--plot-muted);margin-left:6px}
+.fix .qn{background:var(--muted);color:var(--surface)}
+.fix.p-first{border-left-color:#8e1b1b}.fix.p-next{border-left-color:var(--accent)}
+.steps{margin:6px 0 10px;padding-left:20px;font-size:15px}
+.steps li{margin:2px 0;overflow-wrap:anywhere}
+.review ol{margin:8px 0 0;padding-left:22px;color:var(--muted)}
 .own{display:inline-block;font:700 11px/1.5 var(--font);letter-spacing:.02em;background:var(--accent);color:var(--on-accent);border-radius:999px;padding:0 7px;margin-right:6px;vertical-align:1px;white-space:nowrap}
 .evidence{list-style:none;margin:10px 0 0;padding:0;display:grid;gap:6px;font-size:13px;color:var(--muted)}
 .evidence li{overflow-wrap:anywhere}
@@ -1122,6 +1180,11 @@ def render(out_dir: str, theme: dict | None = None, code_map: dict | None = None
         section(4, "q4", "Where did the time go?",
                 "Only now is it worth ranking slices.", q4_time(out_dir, pkg, hs, cm)),
     ]
+    fixes = fix_section(data.get("fix_plan"))
+    if fixes:
+        body.append('<section id="fixes"><h2><span class="qn">5</span>What to fix, in order</h2>'
+                    '<p class="how">Suggestions drawn from this one trace, for a person or an '
+                    'agent to review. They are not instructions.</p>' + fixes + "</section>")
 
     trace = os.path.basename(str(data.get("trace", "")))
     meta = " · ".join(x for x in (
