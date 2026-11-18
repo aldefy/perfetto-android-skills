@@ -42,8 +42,25 @@ Ask, or work out from the repo and device:
 - Is there only **source**? Then Step 2.
 
 `adb devices -l` and `adb shell pm list packages | grep <name>` answer this.
-If no device is connected, say so plainly and stop — this skill cannot invent
-measurements, and a fabricated number is worse than no number.
+If no device is connected, say so plainly: this skill cannot invent
+measurements, and a fabricated number is worse than no number. With source
+but no phone, still do the **source-only checks** and hand back a capture plan:
+
+1. **Baseline Profile already there?** Look for a `baselineprofile` module,
+   `baseline-prof.txt`, or `androidx.profileinstaller` in the dependencies.
+   If there is one, do not suggest adding one. The plan must prove it is
+   applied on the test phone (Step 6, "Prove the profile is applied").
+2. **Benchmark module already there?** A `macrobenchmark` or `benchmark`
+   module means the plan uses it (Step 2b) rather than adb alone.
+3. **What runs before the first frame:** `Application.onCreate`, AndroidX
+   Startup initializers, content providers, the launcher Activity's
+   `onCreate`. List them as *candidates to check in a trace*, never as the
+   cause.
+4. **`reportFullyDrawn` and trace sections:** note whether they exist.
+   Without sections, a trace cannot name the app's own code.
+5. **The capture plan:** a release-like (non-debuggable) build; a cold start,
+   which means force-stopping before every launch (`capture.sh` does this);
+   10 runs; the median, with device and build type. Then Step 3.
 
 ### Step 1 — Capture from an installed build
 
@@ -134,6 +151,11 @@ scripts/ab_startup.sh com.example.app .MainActivity 10 none
 ```bash
 python3 scripts/triage.py trace.pftrace --pkg com.example.app --out triage-out
 ```
+
+`--pkg` is the app's real package name, from the developer, the capture note or
+`adb shell pm list packages`. `com.example.app` in these docs is a placeholder:
+never pass it. If you don't know the package, leave `--pkg` out. Triage then
+reports on the one app the trace launches, or lists them when there are several.
 
 It parses the trace once into a warm `trace_processor` session, runs the query
 pack in `queries/`, and writes:

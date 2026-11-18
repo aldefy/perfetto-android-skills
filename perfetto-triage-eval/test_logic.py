@@ -496,6 +496,45 @@ def heavy_jit_is_flagged_only_when_it_is_a_real_share_of_the_capture():
     assert not jit(600, 60000), "1% of a long capture is normal"
 
 
+
+@case
+def a_warm_or_fast_launch_is_said_up_front():
+    r = base()
+    r["10_startup_summary"] = (STARTUP_H, [["61", PKG, "warm", "110", "107", ""]])
+    warm = [x for x in run(r)[1] if "not cold" in x["title"]]
+    assert warm and warm[0]["severity"] == "medium" and "107 ms" in warm[0]["title"], warm
+    assert "not slow" in warm[0]["detail"]
+    r["10_startup_summary"] = (STARTUP_H, [["1", PKG, "cold", "380", "374", ""]])
+    fast = [x for x in run(r)[1] if "which is not slow" in x["title"]]
+    assert fast and fast[0]["severity"] == "info", fast
+    slow = [x for x in run(base())[1] if "not slow" in x["title"] or "not cold" in x["title"]]
+    assert not slow, "an 880 ms cold start gets neither line"
+
+
+@case
+def platform_processes_never_rank_as_the_apps_problem():
+    for n in ("system_server", "/system/bin/surfaceflinger", "surfaceflinger",
+              "/vendor/bin/hw/android.hardware.composer.hwc3-service.pixel"):
+        assert triage.is_platform_process(n), n
+    for n in (PKG, "com.android.systemui.people", "com.google.android.GoogleCamera"):
+        assert not triage.is_platform_process(n), n
+    H = ["process_name", "short_blocking_method", "short_blocked_method", "n", "total_ms", "max_ms"]
+    r = base()
+    r["32_monitor_contention"] = (H, [["system_server", "a", "b", "3", "331", "200"],
+                                      ["com.google.android.GoogleCamera", "c", "d", "2", "60", "40"]])
+    locks = [x for x in run(r, pkg="*")[1] if x["area"] == "locks"]
+    assert locks and "60 ms" in locks[0]["title"], locks
+    assert "GoogleCamera" in locks[0]["detail"], locks
+    r["32_monitor_contention"] = (H, [["system_server", "a", "b", "3", "331", "200"]])
+    only = [x for x in run(r, pkg="*")[1] if x["area"] == "locks"]
+    assert only and only[0]["severity"] == "info" and "not an app" in only[0]["title"], only
+    BH = ["client_process", "aidl_name", "server_process", "n", "total_ms", "max_ms"]
+    r = base()
+    r["30_binder_main_thread"] = (BH, [["/system/bin/surfaceflinger", "unknown", "/vendor/bin/hw/x", "129", "313", "7.8"]])
+    b = [x for x in run(r, pkg="*")[1] if x["area"] == "binder"]
+    assert b and b[0]["severity"] == "info" and "not an app" in b[0]["title"], b
+
+
 def main():
     failed = 0
     for fn in CASES:

@@ -733,6 +733,29 @@ def analyse(results: dict, pkg: str, mode: str = "unknown",
             return sev
         return sev if srank[sev] >= srank[start_cap] else start_cap
 
+    # Say what launched before saying how it spent its time. A trace named or
+    # described as a cold start can hold a warm one, and a fast start is an
+    # answer in itself: there is nothing slow to fix.
+    for s in startups:
+        ttid = num(s.get("ttid_ms")) or num(s.get("startup_ms"))
+        kind = s.get("startup_type") or ""
+        if not ttid:
+            continue
+        speed = ("under the 500 ms a well-tuned cold start lands in, so it is not slow"
+                 if ttid <= 500 else "over 500 ms")
+        if kind in ("warm", "hot"):
+            add("medium", "startup", f"This launch is {kind}, not cold: {ttid:.0f} ms",
+                f"{s.get('package')} startup_id={s.get('startup_id')}: a {kind} start, "
+                f"{ttid:.0f} ms to first frame, {speed}. A {kind} start reuses a process "
+                "that was already running, so it says little about cold start.",
+                "To measure cold start, force-stop the app before launching it "
+                "(scripts/capture.sh does this). Never compare a warm start with a cold one.")
+        elif kind == "cold" and ttid <= 500:
+            add("info", "startup", f"Cold start is {ttid:.0f} ms, which is not slow",
+                f"{s.get('package')} startup_id={s.get('startup_id')}: {speed}.",
+                "Startup is not the problem in this trace. Look at frames or the "
+                "interaction instead, or capture more runs before acting on one.")
+
     for s in startups:
         ttid = num(s.get("ttid_ms"))
         kind = s.get("startup_type")
@@ -930,6 +953,16 @@ def analyse(results: dict, pkg: str, mode: str = "unknown",
 
     # --- 3. Binder / IPC --------------------------------------------------
     binder = table("30_binder_main_thread")
+    if pkg in ("*", ""):
+        platform = [r for r in binder if is_platform_process(r.get("client_process"))]
+        binder = [r for r in binder if not is_platform_process(r.get("client_process"))]
+        if platform and not binder:
+            p0 = platform[0]
+            add("info", "binder", f"Main-thread binder time is in {p0.get('client_process')}, not an app",
+                f"{num(p0.get('total_ms')) or 0:.0f} ms of synchronous calls from "
+                f"{p0.get('client_process')} to {p0.get('server_process')}. That is a platform "
+                "process. No package was named, so the report cannot say which app is yours.",
+                "Re-run with --pkg <your.package>.")
     if binder:
         worst = binder[0]
         tot = num(worst.get("total_ms")) or 0
@@ -962,14 +995,24 @@ def analyse(results: dict, pkg: str, mode: str = "unknown",
                 "than making the server faster.")
 
     mc = table("32_monitor_contention")
+    if pkg in ("*", ""):
+        platform = [r for r in mc if is_platform_process(r.get("process_name"))]
+        mc = [r for r in mc if not is_platform_process(r.get("process_name"))]
+        if platform and not mc:
+            p0 = platform[0]
+            add("info", "locks", f"Main-thread lock wait is in {p0.get('process_name')}, not an app",
+                f"{num(p0.get('total_ms')) or 0:.0f} ms blocked in "
+                f"{p0.get('short_blocked_method')}. That is a platform process. No package "
+                "was named, so the report cannot say which app is yours.",
+                "Re-run with --pkg <your.package>.")
     if mc:
         top = mc[0]
         tot = num(top.get("total_ms")) or 0
         if tot > 10:
             add("high" if tot > 50 else "medium", "locks",
                 f"Main thread blocked on a lock for {tot:.0f} ms",
-                f"blocked in {top.get('short_blocked_method')} waiting on "
-                f"{top.get('short_blocking_method')} ({top.get('n')} times).",
+                f"{top.get('process_name')}: blocked in {top.get('short_blocked_method')} "
+                f"waiting on {top.get('short_blocking_method')} ({top.get('n')} times).",
                 "Classic invisible stall: nothing is 'running' so CPU profilers show "
                 "nothing. Shrink the critical section, or move the shared state behind "
                 "an actor / single-threaded dispatcher.")
@@ -1253,6 +1296,60 @@ SECTIONS = [
 ]
 
 
+def is_platform_process(name) -> bool:
+    """system_server, surfaceflinger, HALs and native daemons: never "the app".
+
+    With no package named, every query covers every process, and on a real
+    trace the biggest numbers are usually these. Ranking them as the app's
+    problem sends the developer after code they do not own.
+    """
+    n = str(name or "")
+    return (n in ("system_server", "surfaceflinger", "/system/bin/surfaceflinger")
+            or n.startswith(("/system/", "/vendor/", "/apex/", "/odm/", "android.hardware.",
+                             "vendor.", "media.")))
+
+
+def package_in_trace(sess, tmpdir, pkg) -> bool:
+    """True when some process or launch in the trace matches the --pkg glob.
+
+    Process names are cut to 15 characters on some phones, so a launch record
+    or the package list also counts as a match.
+    """
+    path = os.path.join(tmpdir, "_pkg.sql")
+    g = pkg.replace("'", "''")
+    open(path, "w").write(
+        "INCLUDE PERFETTO MODULE android.startup.startups;\n"
+        f"SELECT (SELECT count(*) FROM process WHERE name GLOB '{g}' "
+        f"OR (length(name) BETWEEN 14 AND 16 AND '{g}' GLOB name || '*')) "
+        f"+ (SELECT count(*) FROM android_startups WHERE package GLOB '{g}') "
+        f"+ (SELECT count(*) FROM package_list WHERE package_name GLOB '{g}') AS n;")
+    try:
+        _, rows, err = sess.query_file(path, 120)
+    except Exception:
+        return True
+    if err or not rows:
+        return True     # cannot tell: keep what the user asked for
+    try:
+        return int(float(rows[0][0])) > 0
+    except (TypeError, ValueError):
+        return True
+
+
+def detect_launched_packages(sess, tmpdir):
+    """Packages with an app launch in the trace, in launch order."""
+    path = os.path.join(tmpdir, "_launched.sql")
+    open(path, "w").write("INCLUDE PERFETTO MODULE android.startup.startups;\n"
+                          "SELECT package FROM android_startups WHERE package IS NOT NULL "
+                          "GROUP BY package ORDER BY min(ts);")
+    try:
+        _, rows, err = sess.query_file(path, 120)
+    except Exception:
+        return []
+    if err:
+        return []
+    return [r[0] for r in rows if r and r[0]]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1333,7 +1430,40 @@ def main():
     results, errors = {}, {}
     started = time.time()
     log(f"{len(stems)} queries to run. Phases: load, query, report.")
+    pkg_note = ""
     with Session(tp, args.trace) as sess:
+        wrong_pkg = ""
+        if args.pkg not in ("*", "") and not package_in_trace(sess, tmpdir, args.pkg):
+            # A package that matches nothing turns every query into zero rows,
+            # and zero rows read as "the launch was missed" or "no jank". Agents
+            # copy the example package from the docs, so this is not rare.
+            wrong_pkg = args.pkg
+            args.pkg = "*"
+        if args.pkg in ("*", ""):
+            # No package named. Every process in the trace would count, and on a
+            # real trace the worst numbers usually belong to system processes
+            # (surfaceflinger, system_server), not the app. If the trace holds
+            # exactly one app launch, that app is almost certainly the subject.
+            launched = detect_launched_packages(sess, tmpdir)
+            if len(launched) == 1:
+                args.pkg = launched[0]
+                pkg_note = (f"No --pkg given. The trace has one app launch, `{args.pkg}`, so this "
+                            "report is about that app. Pass --pkg to choose another.")
+            elif launched:
+                pkg_note = ("No --pkg given, and the trace launches more than one app ("
+                            + ", ".join(f"`{x}`" for x in launched[:6])
+                            + "). Platform processes are left out of the findings below, but "
+                            "the apps are mixed. Re-run with --pkg for the app you mean. If you "
+                            "don't know which, analyse the one the request is about and say so.")
+            else:
+                pkg_note = ("No --pkg given and no app launch found, so numbers below mix every "
+                            "process in the trace, system ones included. Re-run with --pkg.")
+            if wrong_pkg:
+                pkg_note = (f"--pkg `{wrong_pkg}` matches no process in this trace, so it was "
+                            "ignored. " + pkg_note.replace("No --pkg given. ", "").replace(
+                                "No --pkg given, and ", "").replace("No --pkg given and ", ""))
+            log(pkg_note.replace("`", ""))
+
         def run_query(tag, stem, sql):
             run_path = os.path.join(tmpdir, stem + ".sql")
             open(run_path, "w").write(sql)
@@ -1435,6 +1565,9 @@ def main():
     out = [f"# Perfetto triage: `{os.path.basename(args.trace)}`", ""]
     out.append(f"Package filter: `{args.pkg}`  ·  capture mode: `{mode}`  ·  "
                f"trace_processor {TP_VERSION}")
+    if pkg_note:
+        out.append("")
+        out.append(f"> {pkg_note}")
     out.append("")
     out.append("## Trust check")
     out.append("")
@@ -1534,7 +1667,7 @@ def main():
         with open(os.path.join(args.out, "code_audit.md"), "w") as fh:
             fh.write(amod.to_markdown(audit, "# Code on the profiled path") + "\n")
     with open(os.path.join(args.out, "findings.json"), "w") as fh:
-        payload = {"trace": args.trace, "pkg": args.pkg, "mode": mode,
+        payload = {"trace": args.trace, "pkg": args.pkg, "pkg_note": pkg_note, "mode": mode,
                    "health_status": status, "findings": findings}
         if capture:
             payload["capture"] = {k: v for k, v in capture.items()

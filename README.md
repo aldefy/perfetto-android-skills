@@ -195,6 +195,11 @@ near-flat, which produced a partial improvement, not a full fix.
 eval that reruns the current code against them. Current state: 2 of 3 traps
 pass, 1 is unproven. See `perfetto-triage-eval/KNOWN-TRAPS.md`.
 
+`perfetto-triage-eval/agent-evals/` tests the skill the way it is used: seven
+plain requests, run by agents with and without it, graded blind against a
+rubric. With the skill, 13 of 14 runs passed; without it, 5 of 14. The
+transcripts drove five fixes. See `perfetto-triage-eval/agent-evals/README.md`.
+
 ## Agent skill installation guide
 
 This is a [Claude Code](https://claude.com/claude-code) agent skill: a
