@@ -8,6 +8,9 @@ run-id:   a folder name, e.g. t1-skill-haiku-a. The agent works in $EVAL_ROOT/ru
 skill-dir: leave out for the baseline (no skill). Give a copy of perfetto-triage/
            for the skill run. Copy it: an agent must never edit the skill it is graded on.
 
+$EVAL_BUDGET (default 20) caps the commands an agent may run, so slow and fast runs
+are compared on the same footing. evals.py checks the cap from each run's log.md.
+
 $EVAL_ROOT (default /tmp/evals) holds traces/ (the four public traces in README.md),
 nia/ (a copy of Now in Android, for t7) and runs/.
 
@@ -42,7 +45,10 @@ TASKS = {
 }
 
 
-def prompt(task: str, run_id: str, skill_dir: str = "") -> str:
+BUDGET = int(os.environ.get("EVAL_BUDGET", "20"))
+
+
+def prompt(task: str, run_id: str, skill_dir: str = "", budget: int = BUDGET) -> str:
     tp = "~/.cache/perfetto-triage/v57.2/trace_processor_shell"
     keep_out = (f"Do not use the Skill tool. Do not read anything under ~/.claude or other "
                 f"{ROOT}/skill-* folders. You may read {ROOT}/nia if the request points there. "
@@ -62,6 +68,7 @@ def prompt(task: str, run_id: str, skill_dir: str = "") -> str:
 
 {tools}
 {keep_out}
+You may run at most {budget} commands (shell commands and file reads together). When you reach that, stop and answer from what you have found.
 
 The developer's request:
 ---
