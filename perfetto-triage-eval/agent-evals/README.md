@@ -43,19 +43,29 @@ in `$EVAL_ROOT/nia/`.
 
 ## Running it
 
-Copy the skill once per version you test, so a run can never edit what it is
-graded on:
+The repo has a skill for this: `.agents/skills/run-agent-evals/SKILL.md`. Point Claude Code or
+Codex at the checkout and ask it to run the evals. By hand:
 
 ```bash
-cp -r perfetto-triage /tmp/evals/skill-v1
-python3 make_prompt.py t1 t1-base-small > /tmp/evals/prompts/t1-base-small.txt
-python3 make_prompt.py t1 t1-skill-small /tmp/evals/skill-v1 > /tmp/evals/prompts/t1-skill-small.txt
+export EVAL_ROOT=/tmp/evals
+cp -r perfetto-triage $EVAL_ROOT/skill-v1          # agents get a copy, never the checkout
+cd perfetto-triage-eval/agent-evals
+python3 evals.py prompts --tasks smoke --configs base,skill --models haiku --skill-dir $EVAL_ROOT/skill-v1
+# start one fresh agent per file in $EVAL_ROOT/prompts/, on the model in its name
+python3 evals.py judge-prep --round r1             # renamed at random, paths scrubbed
+# one judge agent: judge.md, rubric.md, $EVAL_ROOT/judge-r1/
+python3 evals.py tally
 ```
 
-Hand each prompt to a fresh agent with no other context. We used Claude Code
-sub-agents. Any agent with a shell works. Then give the judge `rubric.md` and
-the renamed run folders, and ask for a JSON list with grade, missing items,
-fail reasons, unsupported claims, wasted steps and seconds per run.
+- **Smoke first.** `--tasks smoke` runs t1, t3 and t6: one of each kind of trap, three tasks.
+  Run `all` once those wire up and grade.
+- **A fixed budget.** Every prompt allows 20 commands (`--budget`, or `$EVAL_BUDGET`). When an
+  agent reaches it, it must answer from what it has. `tally` lists any run that went over, from
+  its own log. The first 64 runs below had no budget.
+- **Attempts.** `--attempts 2` or more before trusting a difference between two configs.
+- **Blind, not perfectly.** `judge-prep` scrubs paths, run ids and skill folder names, but a
+  skill run's log still shows it reading `SKILL.md`. The judge can tell the configs apart; it
+  cannot tell the models apart.
 
 ## Results, 18 November 2026
 
