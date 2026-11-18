@@ -18,6 +18,10 @@ python3 synthetic_build_type_check.py    # synthetic trace through trace_process
 No device and no trace file are needed for any of these. The third one
 downloads `trace_processor` on first run, the same way `triage.py` does.
 
+`agent-evals/` is different: it hands plain requests to agents with and
+without the skill, and has a blind judge grade the answers. With the skill,
+13 of 14 runs passed; without it, 5 of 14. See `agent-evals/README.md`.
+
 ## What it checks
 
 Three known traps, documented in `KNOWN-TRAPS.md`, each with a real
